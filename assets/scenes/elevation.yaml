@@ -1,5 +1,15 @@
 # elevation.yaml
 
+global:
+    # Phase 3 (texture shading, docs/texture-shading-plan.md) needs the elevation raster to be a
+    #  3Wx3W "mosaic" texture (tile's own data centered in the middle third, 8 same-zoom neighbor
+    #  tiles tiled around it, real GPU mipmaps enabled) - see the Frozen Interface Contract in that
+    #  doc. Phase 1/2 (neighbor prefetch + CPU-side mosaic stitching) are what actually build such a
+    #  texture for the real elevation source; until that lands (or for a source that doesn't support
+    #  it), this must stay false so all ELEVATION_MOSAIC-gated shader code compiles out entirely -
+    #  we intentionally compile it out, rather than silently degrade, when the mosaic isn't available.
+    elevation_mosaic: false
+
 sources:
     elevation:
         type: Raster
@@ -25,6 +35,10 @@ styles:
                 ELEVATION_FLOAT_TEX: true
                 # sampler2D default is lowp!
                 TANGRAM_RASTER_PRECISION: 'highp'
+                # see docs/texture-shading-plan.md Frozen Interface Contract - gates getElevationAtLod()
+                #  below (and all texture-shading code in hillshade.yaml). Compiles out entirely (no
+                #  crash, no silent degrade) when the elevation source isn't a mosaic texture.
+                ELEVATION_MOSAIC: global.elevation_mosaic
             blocks:
                 global: |
                     #if defined(TANGRAM_FRAGMENT_SHADER) || defined(TANGRAM_VERTEX_RASTERS)
@@ -38,4 +52,21 @@ styles:
                     #endif
                     }
                     float getElevation() { return getElevationAt(currentRasterUV(ELEVATION_INDEX)); }
+                    #ifdef ELEVATION_MOSAIC
+                    // u_rasters[ELEVATION_INDEX] is assumed to be a 3Wx3W "mosaic" texture per the Frozen
+                    //  Interface Contract (docs/texture-shading-plan.md): tile's own WxW data centered in
+                    //  the middle third [W,2W)x[W,2W), 8 same-zoom neighbor tiles tiled around it, uploaded
+                    //  with generateMipmaps=true / minFilter=LINEAR_MIPMAP_LINEAR. textureLod's hardware mip
+                    //  chain over this mosaic gives real (non-aliased) multi-scale low-pass elevation
+                    //  samples, used by textureShading() in hillshade.yaml to build a Laplacian pyramid.
+                    float getElevationAtLod(vec2 uv, float lod) {  // in meters; uv is tile-local [0,1]
+                        vec2 muv = (uv + 1.0) / 3.0;
+                        vec4 h = textureLod(u_rasters[ELEVATION_INDEX], muv, lod);
+                    #ifdef ELEVATION_FLOAT_TEX
+                        return h.r;
+                    #else
+                        return (h.r*256. + h.g + h.b/256.)*255. - 32768.;  // mapzen terrarium
+                    #endif
+                    }
+                    #endif
                     #endif

@@ -48,6 +48,26 @@ application:
             step: 100
             min: -9000
             max: 9000
+        # Texture shading (docs/texture-shading-plan.md Phase 3) - only has any visible effect when
+        #  ELEVATION_MOSAIC is enabled for the active elevation source (see elevation.yaml)
+        u_texture_shading_alpha:
+            style: hillshade
+            label: Texture Shading Alpha
+            min: 0
+            max: 2
+            step: 0.05
+        u_texture_shading_contrast:
+            style: hillshade
+            label: Texture Shading Contrast
+            min: 0
+            max: 5
+            step: 0.1
+        u_texture_shading_opacity:
+            style: hillshade
+            label: Texture Shading Opacity
+            min: 0
+            max: 1
+            step: 0.05
 
 
 styles:
@@ -81,10 +101,17 @@ styles:
                 METRIC_UNITS: global.metric_units
                 SHOW_CONTOURS: global.show_contours
                 SHOW_HYPSOMETRIC: global.show_hypsometric
+                # Laplacian-pyramid depth for texture shading (docs/texture-shading-plan.md Frozen
+                #  Interface Contract) - default 7 matches log2(256); must not exceed what a single
+                #  ring of neighbor tiles can support, i.e. 2^level <= W.
+                TEXTURE_SHADING_MAX_LEVELS: 7
             uniforms:
                 u_exaggerate: 4.5
                 u_contour_color: global.contour_color
                 u_min_contour_elev: 0.0
+                u_texture_shading_alpha: 0.75
+                u_texture_shading_contrast: 1.0
+                u_texture_shading_opacity: 0.5
                 # https://github.com/der-stefan/OpenTopoMap/blob/master/mapnik/relief_color_text_file.txt
                 # - stop offset in meters/10000
                 u_terrain_color: |
@@ -114,6 +141,40 @@ styles:
                       discard;  //color = vec4(uv.x, uv.y, 0.0, 1.0);
 
             blocks:
+                global: |
+                    // Fragment-only: getElevationAtLod (elevation.yaml) is itself gated to fragment/
+                    //  vertex-rasters stages, and TANGRAM_VERTEX_RASTERS is false for plain 2D hillshade,
+                    //  so without this guard textureShading() would leak into the vertex shader (where
+                    //  polygon.vs also has a `#pragma tangram: global` insertion point) and fail to link
+                    //  (getElevationAtLod undefined there) even though it's only ever called from the
+                    //  fragment-only "color" block below.
+                    #if defined(ELEVATION_MOSAIC) && defined(TANGRAM_FRAGMENT_SHADER)
+                    // Live, per-tile approximation of Leland Brown's texture shading (a scale-invariant,
+                    //  fractional-Laplacian high-pass filter over elevation - see
+                    //  docs/texture-shading-plan.md for background and the Frozen Interface Contract this
+                    //  must match). Brown's own algorithm is a global offline FFT/DCT operation; here we
+                    //  approximate it live by building a Laplacian/octave pyramid out of the real GPU
+                    //  mipmap chain of the mosaic elevation texture (getElevationAtLod, elevation.yaml):
+                    //  each octave band k is the bandpass difference between adjacent mip levels, weighted
+                    //  by the geometrically-correct discretization 2^(-k*alpha) of Brown's |freq|^alpha
+                    //  power-law filter, then squashed through Brown's closed-form contrast curve.
+                    // Forward-declared: defined in elevation.yaml's get-elevation style (mixed into this
+                    //  style). Block-merge order across mixed styles isn't guaranteed, so declare the
+                    //  prototype here rather than rely on getElevationAtLod's definition coming first.
+                    float getElevationAtLod(vec2 uv, float lod);
+                    float textureShading(vec2 uv) {
+                        float z = 0.0;
+                        float h_prev = getElevationAtLod(uv, 0.0);
+                        for (int k = 0; k < TEXTURE_SHADING_MAX_LEVELS; k++) {
+                            float h_next = getElevationAtLod(uv, float(k + 1));
+                            // band k = LoD_k - LoD_(k+1), i.e. what mip level k+1's blur removes from level k
+                            z += (h_prev - h_next) * pow(2.0, -float(k) * u_texture_shading_alpha);
+                            h_prev = h_next;
+                        }
+                        float az = u_texture_shading_contrast * z;
+                        return az / (2.0*sqrt(1.0 + az*az)) + 0.5;
+                    }
+                    #endif
                 normal: |
                     // Using 9 texel patch, estimate 1st and 2nd deriv to smooth elevation and normal
                     vec2 st = currentRasterUV(ELEVATION_INDEX);
@@ -222,6 +283,19 @@ styles:
                         cov += max(0.5 - dup + coarsehw, 0.) + max(0.5 - ddn + coarsehw, 0.);
                         base_color = mix(base_color, contour_color, min(cov, 1.));
                     }
+                    #endif
+                    #ifdef ELEVATION_MOSAIC
+                    // texture shading (docs/texture-shading-plan.md Phase 3) - mirrors the tint-mixing
+                    //  pattern in slope-angle.yaml's color block; grayscale ts_tint modulates base_color
+                    //  the same way regardless of which base_color branch (raster/3D-terrain/2D-hillshade)
+                    //  is active above, scaled by u_texture_shading_opacity (0 = no visible effect)
+                    float ts_shade = textureShading(currentRasterUV(ELEVATION_INDEX));
+                    vec4 ts_tint = vec4(vec3(ts_shade), 1.0);
+                    #ifdef HILLSHADE_BLEND_OVER
+                    base_color = mix(base_color, vec4(ts_tint.rgb, u_texture_shading_opacity), 1.0/(1.0 + base_color.a));
+                    #else
+                    base_color = mix(base_color, ts_tint, u_texture_shading_opacity);
+                    #endif
                     #endif
                     // apply lighting to get final color
                     #ifdef HILLSHADE_BLEND_OVER
