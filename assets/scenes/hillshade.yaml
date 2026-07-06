@@ -102,15 +102,27 @@ styles:
                 SHOW_CONTOURS: global.show_contours
                 SHOW_HYPSOMETRIC: global.show_hypsometric
                 # Laplacian-pyramid depth for texture shading (docs/texture-shading-plan.md Frozen
-                #  Interface Contract) - default 7 matches log2(256); must not exceed what a single
-                #  ring of neighbor tiles can support, i.e. 2^level <= W.
-                TEXTURE_SHADING_MAX_LEVELS: 7
+                #  Interface Contract). Phase 4 finding against real (257x257) tiles + a single
+                #  mirrored/mirrored-and-rotated neighbor ring: "2^level <= W" alone is not a safe
+                #  bound -- a GPU mip level k box-filters over roughly a 2^k x 2^k footprint of the
+                #  *mosaic*, so even at k=7 (2^7=128, barely under W=257) the footprint at most points
+                #  in the tile -- not just near its edges -- already extends into the neighbor cells,
+                #  which are frequently synthesized via mirror-extrapolation (RasterSource, Phase 2)
+                #  rather than real data when a neighbor hasn't loaded yet (cold cache / fresh
+                #  pan/zoom). Since texture shading is a high-pass filter, it makes that synthetic
+                #  mirrored/180-rotated structure blatantly visible as a repeating, "rotated tile"
+                #  pattern -- something the gentle 3x3-texel Lambertian normal calc never exposed.
+                #  Keeping 2^level well under W/2 (not just under W) keeps the sampling footprint
+                #  mostly inside the tile's own real data for most pixels, greatly reducing reliance
+                #  on (possibly synthetic) neighbor cells. Revisit if/when a real shared cross-tile
+                #  mosaic (explicitly deferred, see plan's Non-goals) removes the mirroring entirely.
+                TEXTURE_SHADING_MAX_LEVELS: 4
             uniforms:
                 u_exaggerate: 4.5
                 u_contour_color: global.contour_color
                 u_min_contour_elev: 0.0
                 u_texture_shading_alpha: 0.75
-                u_texture_shading_contrast: 1.0
+                u_texture_shading_contrast: 0.05
                 u_texture_shading_opacity: 0.5
                 # https://github.com/der-stefan/OpenTopoMap/blob/master/mapnik/relief_color_text_file.txt
                 # - stop offset in meters/10000
@@ -288,13 +300,22 @@ styles:
                     // texture shading (docs/texture-shading-plan.md Phase 3) - mirrors the tint-mixing
                     //  pattern in slope-angle.yaml's color block; grayscale ts_tint modulates base_color
                     //  the same way regardless of which base_color branch (raster/3D-terrain/2D-hillshade)
-                    //  is active above, scaled by u_texture_shading_opacity (0 = no visible effect)
+                    //  is active above, scaled by u_texture_shading_opacity (0 = no visible effect).
+                    // Phase 4 fix (docs/texture-shading-plan.md): slope-angle.yaml's tint carries a
+                    //  *spatially-varying* alpha (tint.a from its gradient texture, ~0 on flat ground) so
+                    //  flat areas contribute ~nothing to the final `mix(color, base_color, base_color.a)`
+                    //  composite. The original texture-shading code instead passed the constant
+                    //  u_texture_shading_opacity as alpha everywhere, so even perfectly flat/neutral
+                    //  terrain (ts_shade == 0.5) got the same blend strength as a real ridge -- washing
+                    //  the entire map in flat gray instead of only tinting actual ridge/canyon structure.
+                    //  Scale alpha by the deviation of ts_shade from its neutral midpoint (0.5) instead.
                     float ts_shade = textureShading(currentRasterUV(ELEVATION_INDEX));
                     vec4 ts_tint = vec4(vec3(ts_shade), 1.0);
+                    float ts_alpha = abs(ts_shade - 0.5) * 2.0 * u_texture_shading_opacity;
                     #ifdef HILLSHADE_BLEND_OVER
-                    base_color = mix(base_color, vec4(ts_tint.rgb, u_texture_shading_opacity), 1.0/(1.0 + base_color.a));
+                    base_color = mix(base_color, vec4(ts_tint.rgb, ts_alpha), 1.0/(1.0 + base_color.a));
                     #else
-                    base_color = mix(base_color, ts_tint, u_texture_shading_opacity);
+                    base_color = mix(base_color, ts_tint, ts_alpha);
                     #endif
                     #endif
                     // apply lighting to get final color

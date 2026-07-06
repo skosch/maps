@@ -90,20 +90,35 @@ phases depend on these numbers being stable.**
   ```
   Guarded behind a new define `ELEVATION_MOSAIC` so existing `getElevationAt`
   behavior (and all other raster styles) is unaffected when it's not set.
-- **Pyramid depth**: compile-time define `TEXTURE_SHADING_MAX_LEVELS`, default `7`
-  (matches `log2(256)`; if actual tile size differs, adjust proportionally — must not
-  exceed what a single neighbor ring can support without reading past real data,
-  i.e. `2^level <= W`).
+- **Pyramid depth**: compile-time define `TEXTURE_SHADING_MAX_LEVELS`, default `4`
+  (revised in Phase 4 — see "Phase 4 integration findings" below the Phase 4 section;
+  the original default of `7`, and the guard `2^level <= W`, are **not safe**: a GPU
+  mip level `k` box-filters roughly a `2^k x 2^k` footprint of the mosaic, so even at
+  `k=7` (`2^7=128`, technically `<= W=257`) that footprint already extends into the
+  (frequently mirror-extrapolated, not real) neighbor cells for most pixels in the
+  tile, not just near its edges. Keep `2^level` well under `W/2`, not just under `W`.)
 - **Band weight**: `pow(2.0, -float(k) * u_texture_shading_alpha)`.
 - **Contrast curve**: `float az = u_texture_shading_contrast * z; float shade = az / (2.0*sqrt(1.0+az*az)) + 0.5;`
 - **New uniforms** (`assets/scenes/hillshade.yaml`), all exposed via `gui_variables`
   following the existing pattern in that file / `slope-angle.yaml:6-11`:
   - `u_texture_shading_alpha` (range 0..2, default 0.75 — Brown's recommended sweet spot)
-  - `u_texture_shading_contrast` (default ~1.0)
+  - `u_texture_shading_contrast` (default ~1.0 in the original spec; Phase 4 found this
+    saturates the contrast curve almost everywhere against real meter-scale elevation
+    data rather than Phase 3's small-amplitude synthetic test PNG — current default on
+    this branch is `0.05`, itself not fully validated, see Phase 4 findings; needs
+    real tuning in Phase 5, ideally with the curve made resolution/zoom-independent
+    rather than a bare unnormalized multiplier against raw meters)
   - `u_texture_shading_opacity` (range 0..1, default 0.5; 0 = pure existing Lambertian look)
 - **Blend**: mix the contrast-stretched `shade` value into `base_color`/`contour_color`
   using the existing `HILLSHADE_BLEND_OVER` pattern, mirroring how
-  `slope-angle.yaml:68-76` mixes its `tint`.
+  `slope-angle.yaml:68-76` mixes its `tint`. **Phase 4 correction**: mirroring that
+  pattern means the tint's *alpha* must itself be spatially varying (as
+  `slope-angle.yaml`'s `tint.a` is, from its gradient-texture lookup, ~0 on flat
+  ground) — not the constant `u_texture_shading_opacity`. Use
+  `ts_alpha = abs(ts_shade - 0.5) * 2.0 * u_texture_shading_opacity` as the alpha
+  passed into the `mix(...)` calls, not `u_texture_shading_opacity` directly (the
+  original Phase 3 code used the constant directly, which was a real bug — see
+  Phase 4 findings above).
 
 ### Addendum from Phase 2 (implemented — read before starting Phase 1/3 work)
 
@@ -363,6 +378,88 @@ synthetic) elevation tiles, and smoke-test.
 6. Single commit (or small commit series) on branch `texture-shading-phase4-integration`.
    **Do not merge to `master` or push to any remote — stop and hand back for human
    review**, per this project's standing git safety rules.
+
+### Phase 4 integration findings (real, non-tuning bugs found running all 3 phases together)
+
+Merging phases 1-3 and running them together against **real** elevation tiles (never
+done before — each prior phase tested in isolation) surfaced three real bugs, not
+just visual-tuning issues. Two are fixed on this branch; the third is NOT fixed and
+is why `global.elevation_mosaic` is left `false` (see `assets/scenes/elevation.yaml`)
+— i.e. **texture shading is fully implemented and wired end-to-end but disabled by
+default**, pending follow-up work below.
+
+1. **Fixed — blend-alpha bug (`assets/scenes/hillshade.yaml`).** The texture-shading
+   blend used `vec4(ts_tint.rgb, u_texture_shading_opacity)` as the tint passed into
+   the `mix(base_color, tint, 1.0/(1.0+base_color.a))` pattern copied from
+   `slope-angle.yaml`. That pattern only works because slope-angle's `tint.a` is
+   *itself spatially varying* (near 0 on flat ground, from its gradient-texture
+   lookup), so flat areas contribute ~nothing to the final composite. Texture
+   shading instead passed a flat *constant* alpha (`u_texture_shading_opacity`)
+   everywhere, so perfectly flat/neutral terrain (`ts_shade == 0.5`) got the exact
+   same blend strength as a real ridge — washing the whole map in flat gray rather
+   than only tinting real ridge/canyon structure. Fixed by scaling alpha by the
+   deviation of `ts_shade` from its neutral midpoint: `ts_alpha = abs(ts_shade -
+   0.5) * 2.0 * u_texture_shading_opacity`.
+2. **Fixed (partial mitigation) — pyramid depth vs. real tile size.** The Frozen
+   Interface Contract's guard for `TEXTURE_SHADING_MAX_LEVELS` ("must not exceed
+   what a single neighbor ring can support, i.e. `2^level <= W`") is not a safe
+   bound in practice. A GPU mip level `k` box-filters roughly a `2^k x 2^k` texel
+   footprint of the *mosaic*; at the contract's default `k=7` (`2^7=128`, barely
+   under the real `W=257`), that footprint already extends into the neighbor cells
+   for most pixels in the tile, not just near its edges. Neighbor cells are
+   frequently mirror-extrapolated (Phase 2) rather than real when a neighbor hasn't
+   loaded yet, and since texture shading is a high-pass filter, it makes that
+   synthetic mirrored/point-reflected structure blatantly visible as a repeating,
+   "kaleidoscope" tile pattern — something the original gentle 3x3-texel Lambertian
+   normal calc never exposed. Reduced default to `TEXTURE_SHADING_MAX_LEVELS: 4` so
+   the footprint stays mostly inside real tile data for most pixels. **This helped
+   but did not fully resolve the pattern** — see finding 3.
+3. **NOT fixed — neighbor-prefetch/mosaic-build congestion at realistic zoom levels.**
+   At any view showing more than a handful of tiles (e.g. a city-wide zoom, or even
+   a normal ~1km-wide zoomed-in view — both tested), Phase 1's prefetch enqueues 8
+   neighbor fetches *per visible tile*, and Phase 2's `RasterTileTask::addRaster()`
+   unconditionally built a full `3W x 3W` mosaic (with its own 8 `getTexture()`
+   lookups) for **every** one of those prefetch-only tiles too, even though
+   prefetch-only tiles are never rendered. With dozens of visible tiles this means
+   hundreds of wasted mosaic builds competing for the same limited tile-worker pool
+   as real (non-elevation, e.g. OSM vector) tile loads. Observed effects: the app's
+   CPU usage saturated (e.g. 3.5 CPU-minutes consumed in under a minute of
+   wall-clock), the OSM base vector layer did not render at all even after 60+
+   seconds, and most elevation neighbors still hadn't resolved to real data (heavy
+   reliance on mirror-extrapolation) well after startup. Applied one mitigation on
+   this branch — skip `buildElevationMosaic()` when `task->isProxy()` is true
+   (covers both prefetch-only tiles and genuine lower-zoom placeholder/proxy tiles;
+   see `RasterTileTask::addRaster()` in `rasterSource.cpp`) — which measurably
+   reduced CPU load, but **the OSM base layer still failed to render and the
+   kaleidoscope pattern still persisted** in testing after this fix. The remaining
+   cause is not fully isolated; plausible contributors that need dedicated
+   follow-up investigation:
+   - Even only for genuinely *visible* tiles (not skipped by the `isProxy()` fix),
+     a wide view can have dozens of them, each doing a full mosaic stitch — may
+     still be enough to starve the worker pool on its own.
+   - The plan's own **Non-goal** ("do not attempt a shared cross-tile mosaic
+     texture... deliberately deferred optimization") may be a more fundamental
+     problem than anticipated: each tile independently mip-maps its *own copy* of
+     neighboring pixel data, so even with 100% real (non-mirrored) neighbor data,
+     independently-built mosaics for adjacent tiles are not guaranteed to produce
+     bit-identical high-pass results at the shared boundary. A high-pass filter
+     (texture shading) amplifies exactly this kind of tiny cross-tile
+     inconsistency far more visibly than the original Lambertian shading ever did.
+     Confirming whether this is the dominant cause (as opposed to simply "not
+     enough neighbors loaded yet") needs a controlled test with a fully warm,
+     complete elevation cache for the entire visible area before judging the
+     steady-state visual result — not yet done.
+   - Should also double check whether repeated killing/relaunching of the app
+     during this investigation (many times, to change config) left the
+     `TileWorker` thread pool or `m_loadTasks` queue in some unusual state; a
+     single long-running session was not tested end-to-end after the `isProxy()`
+     fix.
+
+**Recommendation:** do not flip `global.elevation_mosaic` to `true` for production
+until finding 3 is root-caused and fixed. The plumbing (Phase 1 prefetch, Phase 2
+stitching, Phase 3 shader) all work correctly in isolation and the mechanics were
+verified end-to-end (real 257x257 tiles → 771x771 mosaics, logged, no GL errors, no
+crashes) — this is a real-data-only visual/performance problem, not a wiring bug.
 
 ---
 

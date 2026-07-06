@@ -4,10 +4,15 @@ global:
     # Phase 3 (texture shading, docs/texture-shading-plan.md) needs the elevation raster to be a
     #  3Wx3W "mosaic" texture (tile's own data centered in the middle third, 8 same-zoom neighbor
     #  tiles tiled around it, real GPU mipmaps enabled) - see the Frozen Interface Contract in that
-    #  doc. Phase 1/2 (neighbor prefetch + CPU-side mosaic stitching) are what actually build such a
-    #  texture for the real elevation source; until that lands (or for a source that doesn't support
-    #  it), this must stay false so all ELEVATION_MOSAIC-gated shader code compiles out entirely -
-    #  we intentionally compile it out, rather than silently degrade, when the mosaic isn't available.
+    #  doc. Phase 1/2 (neighbor prefetch + CPU-side mosaic stitching) build such a texture for the
+    #  real elevation source below whenever 3D terrain/ElevationManager is active (scene.cpp sets
+    #  RasterSource::m_buildElevationMosaic unconditionally in that case), so the mechanics work
+    #  end-to-end (verified: real 257x257 tiles stitch into 771x771 mosaics, logged and correct).
+    #  BUT: Phase 4 smoke-testing against real production data (not Phase 3's synthetic test PNG)
+    #  found the *visual result* is not production-ready -- see "Phase 4 integration findings"
+    #  in docs/texture-shading-plan.md (under the Phase 4 section). Left false here until
+    #  that's resolved; flipping to true also compiles in all ELEVATION_MOSAIC-gated shader
+    #  code (see get-elevation style below) for whoever picks this up next.
     elevation_mosaic: false
 
 sources:
