@@ -10,6 +10,12 @@ global:
     #  hillshading, zero mosaic overhead. The app toggles this via SceneUpdate from the
     #  "Texture shading" checkbox (see MapsApp::loadSceneFile).
     elevation_mosaic: false
+    # 1 for node-registered elevation tiles (odd size, e.g. 257x257: outermost row/col is
+    #  shared with the adjacent tile - true of the arcgis source below), 0 for
+    #  pixel-registered (even, e.g. 256x256 terrarium) tiles. Must match the source, since
+    #  the mosaic drops the duplicated shared line per cell (cells are W - overlap wide) and
+    #  the shader's mosaic UV remap needs the tile's true sample count W.
+    elevation_tile_overlap: 1
 
 sources:
     elevation:
@@ -40,20 +46,30 @@ styles:
                 #  below (and all texture-shading code in hillshade.yaml). Compiles out entirely (no
                 #  crash, no silent degrade) when the elevation source isn't a mosaic texture.
                 ELEVATION_MOSAIC: global.elevation_mosaic
+                ELEVATION_TILE_OVERLAP: global.elevation_tile_overlap
             blocks:
                 global: |
                     #if defined(TANGRAM_FRAGMENT_SHADER) || defined(TANGRAM_VERTEX_RASTERS)
+                    #ifdef ELEVATION_MOSAIC
+                    // The bound elevation raster is a 3Wp x 3Wp neighbor mosaic (Wp = W minus the
+                    //  ELEVATION_TILE_OVERLAP shared line dropped per cell - see rasterSource.cpp)
+                    //  with the tile's own data in the middle third, so every tile-local UV must be
+                    //  remapped into the center cell. The tile's W samples at uv = (i + 0.5)/W land on
+                    //  mosaic texel Wp + i (contiguous global sample grid), giving the remap below.
+                    //  Missing this remap entirely was the root cause of the "kaleidoscope" artifact
+                    //  in the Phase 4 findings: normals/contours were computed over the whole mosaic.
+                    vec2 elevationMosaicUV(vec2 uv) {
+                        vec2 msize = rasterPixelSize(ELEVATION_INDEX);  // 3 * Wp
+                        vec2 Wp = msize / 3.0;
+                        return (uv * (Wp + float(ELEVATION_TILE_OVERLAP)) + Wp) / msize;
+                    }
+                    #endif
                     vec4 sampleElevationTex(vec2 uv) {
                     #ifdef ELEVATION_MOSAIC
-                        // The bound elevation raster is a 3Wx3W neighbor mosaic with the tile's own
-                        //  data in the middle third (docs/texture-shading-plan.md Frozen Interface
-                        //  Contract), so every tile-local UV must be remapped into the center cell.
-                        //  Missing this remap was the root cause of the "kaleidoscope" artifact in the
-                        //  Phase 4 findings: normals/contours were computed over the whole mosaic.
-                        //  Explicit LOD 0 because the mosaic carries real mipmaps (for
+                        // Explicit LOD 0 because the mosaic carries real mipmaps (for
                         //  getElevationAtLod below); implicit-LOD sampling would blur elevation reads
                         //  under minification, changing normal/contour behavior vs. the plain texture.
-                        return textureLod(u_rasters[ELEVATION_INDEX], (uv + 1.0) / 3.0, 0.0);
+                        return textureLod(u_rasters[ELEVATION_INDEX], elevationMosaicUV(uv), 0.0);
                     #else
                         return texture2D(u_rasters[ELEVATION_INDEX], uv);
                     #endif
@@ -69,15 +85,14 @@ styles:
                     }
                     float getElevation() { return getElevationAt(currentRasterUV(ELEVATION_INDEX)); }
                     #ifdef ELEVATION_MOSAIC
-                    // u_rasters[ELEVATION_INDEX] is assumed to be a 3Wx3W "mosaic" texture per the Frozen
-                    //  Interface Contract (docs/texture-shading-plan.md): tile's own WxW data centered in
-                    //  the middle third [W,2W)x[W,2W), 8 same-zoom neighbor tiles tiled around it, uploaded
-                    //  with generateMipmaps=true / minFilter=LINEAR_MIPMAP_LINEAR. textureLod's hardware mip
+                    // u_rasters[ELEVATION_INDEX] is assumed to be a 3Wp x 3Wp "mosaic" texture per the
+                    //  Frozen Interface Contract (docs/texture-shading-plan.md): tile's own data centered
+                    //  in the middle third, 8 same-zoom neighbor tiles tiled around it, uploaded with
+                    //  generateMipmaps=true / minFilter=LINEAR_MIPMAP_LINEAR. textureLod's hardware mip
                     //  chain over this mosaic gives real (non-aliased) multi-scale low-pass elevation
                     //  samples, used by textureShading() in hillshade.yaml to build a Laplacian pyramid.
                     float getElevationAtLod(vec2 uv, float lod) {  // in meters; uv is tile-local [0,1]
-                        vec2 muv = (uv + 1.0) / 3.0;
-                        vec4 h = textureLod(u_rasters[ELEVATION_INDEX], muv, lod);
+                        vec4 h = textureLod(u_rasters[ELEVATION_INDEX], elevationMosaicUV(uv), lod);
                     #ifdef ELEVATION_FLOAT_TEX
                         return h.r;
                     #else

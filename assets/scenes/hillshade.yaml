@@ -53,12 +53,20 @@ application:
         #  when the "Texture shading" checkbox is on. Balance against the normal hillshade via
         #  "Hillshade Exaggeration" above (0 = texture shading only).
         # Band-weight exponent (Brown's alpha, weight 2^(-k*alpha) for octave band k): lower =
-        #  broad landforms dominate, higher = fine detail dominates.
+        #  broad landforms dominate, higher = fine detail dominates. The main slider is the
+        #  value at view zoom >= 13; "Zoomed Out" is the value at zoom <= 10.5 (interpolated
+        #  in between, so detail emphasis eases off as more terrain comes into view).
         u_texture_shading_alpha:
             style: hillshade
             label: Texture Shading Alpha
             min: 0
-            max: 2
+            max: 3
+            step: 0.05
+        u_texture_shading_alpha_min:
+            style: hillshade
+            label: Texture Shading Alpha Zoomed Out
+            min: 0
+            max: 3
             step: 0.05
         u_texture_shading_contrast:
             style: hillshade
@@ -145,13 +153,16 @@ styles:
                 u_exaggerate: 4.5
                 u_contour_color: global.contour_color
                 u_min_contour_elev: 0.0
-                u_texture_shading_alpha: 0.75
+                # band-weight exponent at high zoom (>= z13) / low zoom (<= z10.5); interpolated
+                #  in between - see textureShading()
+                u_texture_shading_alpha: 2.0
+                u_texture_shading_alpha_min: 0.5
                 # contrast multiplies a dimensionless slope-like value (see textureShading()), so
                 #  its useful range is O(1) at any zoom level
                 u_texture_shading_contrast: 1.0
                 u_texture_shading_opacity: 0.7
                 u_texture_shading_levels: 6
-                u_texture_shading_scale: 0.0
+                u_texture_shading_scale: 1.25
                 u_texture_shading_blend: 1.0
                 # https://github.com/der-stefan/OpenTopoMap/blob/master/mapnik/relief_color_text_file.txt
                 # - stop offset in meters/10000
@@ -216,13 +227,19 @@ styles:
                         //  positive = coarser (emphasize broad ridge/valley landforms, suppress fine
                         //  noise), negative = finer.
                         float b = max(0.0, u_map_position.z - u_tile_origin.w) + u_texture_shading_scale;
+                        // zoom-dependent band-weight exponent: u_texture_shading_alpha applies fully
+                        //  at view zoom >= 13 (fine ridge/gully detail dominates), easing down to
+                        //  u_texture_shading_alpha_min at zoom <= 10.5 (broad landforms dominate when
+                        //  a whole range is in view); linear in continuous zoom, so no visible steps
+                        float ts_a = mix(u_texture_shading_alpha_min, u_texture_shading_alpha,
+                                         clamp((u_map_position.z - 10.5) / 2.5, 0.0, 1.0));
                         float z = 0.0;
                         float h_prev = getElevationAtLod(uv, b);
                         for (int k = 0; k < TEXTURE_SHADING_MAX_LEVELS; k++) {
                             if (float(k) >= u_texture_shading_levels) { break; }
                             float h_next = getElevationAtLod(uv, b + float(k + 1));
                             // band k = LoD_k - LoD_(k+1), i.e. what mip level k+1's blur removes from level k
-                            z += (h_prev - h_next) * pow(2.0, -float(k) * u_texture_shading_alpha);
+                            z += (h_prev - h_next) * pow(2.0, -float(k) * ts_a);
                             h_prev = h_next;
                         }
                         // normalize the band sum (meters) by the ground size of the base band's sampling
@@ -239,10 +256,11 @@ styles:
                     vec2 st = currentRasterUV(ELEVATION_INDEX);
                     vec2 texwh = rasterPixelSize(ELEVATION_INDEX);
                     #ifdef ELEVATION_MOSAIC
-                    // rasterPixelSize reports the full 3Wx3W mosaic; all the tile-local texel math
-                    //  below (texel centers, finite-difference offsets, meters-per-texel) wants the
-                    //  tile's own W. getElevationAt() itself does the mosaic UV remap.
-                    texwh /= 3.0;
+                    // rasterPixelSize reports the full 3Wp x 3Wp mosaic (Wp = W - overlap, the shared
+                    //  line dropped per cell - see elevation.yaml); all the tile-local texel math below
+                    //  (texel centers, finite-difference offsets, meters-per-texel) wants the tile's
+                    //  own sample count W. getElevationAt() itself does the mosaic UV remap.
+                    texwh = texwh / 3.0 + float(ELEVATION_TILE_OVERLAP);
                     #endif
                     vec2 duv = 1./texwh;
                     vec2 ij = st * texwh;
