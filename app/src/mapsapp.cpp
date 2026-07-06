@@ -52,6 +52,7 @@ YAML::Node MapsApp::config;
 std::string MapsApp::configFile;
 bool MapsApp::metricUnits = true;
 bool MapsApp::terrain3D = true;
+bool MapsApp::textureShading = false;
 sqlite3* MapsApp::bkmkDB = NULL;
 SQLiteDB MapsApp::placesDB;
 std::vector<Color> MapsApp::markerColors;
@@ -786,6 +787,9 @@ void MapsApp::loadSceneFile(bool async, bool setPosition)
   options.updates.push_back(SceneUpdate{"scene.elevation_source",
       cfg()["sources"]["elevation"][0].as<std::string>("")});
   if(terrain3D) { options.updates.push_back(SceneUpdate{"scene.terrain_3d", "true"}); }
+  // compiles in the ELEVATION_MOSAIC shader path and enables neighbor prefetch + mosaic
+  //  stitching for the elevation source (see elevation.yaml, hillshade.yaml, scene.cpp)
+  if(textureShading) { options.updates.push_back(SceneUpdate{"global.elevation_mosaic", "true"}); }
   options.updates.push_back(SceneUpdate{"global.metric_units", metricUnits ? "true" : "false"});
   options.updates.push_back(SceneUpdate{"global.shuffle_seed", std::to_string(shuffleSeed)});
   options.updates.push_back(SceneUpdate{"global.selected_osm_id", "~"});  // ensure Node exists
@@ -1639,6 +1643,16 @@ void MapsApp::createGUI(SDL_Window* sdlWin)
   terrain3dCb->setChecked(terrain3D);
   overflowMenu->addItem(terrain3dCb);
 
+  textureShadingCb = createCheckBoxMenuItem("Texture shading");
+  textureShadingCb->onClicked = [=](){
+    textureShading = !textureShading;
+    config["texture_shading"]["enabled"] = textureShading;
+    textureShadingCb->setChecked(textureShading);
+    mapsSources->rebuildSource(mapsSources->currSource);
+  };
+  textureShadingCb->setChecked(textureShading);
+  overflowMenu->addItem(textureShadingCb);
+
   Button* themeCb = createCheckBoxMenuItem("Light theme");
   themeCb->onClicked = [=](){
     bool light = !themeCb->checked();
@@ -2356,6 +2370,7 @@ MapsApp::MapsApp(Platform* _platform) : touchHandler(new TouchHandler(this))
   mainThreadId = std::this_thread::get_id();
   metricUnits = cfg()["metric_units"].as<bool>(true);
   terrain3D = cfg()["terrain_3d"]["enabled"].as<bool>(false);
+  textureShading = cfg()["texture_shading"]["enabled"].as<bool>(false);
   // Google Maps and Apple Maps use opposite scaling for this gesture, so definitely needs to be configurable
   touchHandler->dblTapDragScale = cfg()["gestures"]["dbl_tap_drag_scale"].as<float>(1.0f);
   shuffleSeed = cfg()["random_shuffle_seed"].as<bool>(true) ? std::rand() : 0;

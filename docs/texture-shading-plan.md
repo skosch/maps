@@ -488,3 +488,32 @@ Once Phase 4 is reviewed and running, check by hand:
   find in the real code, you MUST update that section of this file and clearly flag
   the change in your final report, since other phases depend on it staying stable.
 - Do not push to any remote or merge into `master` without explicit human approval.
+
+### Resolution addendum (post-Phase 4 rework, 2026-07-05)
+
+The Phase 4 findings above are superseded as follows:
+
+- **Kaleidoscope artifact — root cause found and fixed.** It was never mip-footprint
+  bleed: `getElevationAt()` (used by the normal/contour code and 3D-terrain vertex
+  displacement) was sampling the mosaic *without* the center-cell UV remap that only
+  `getElevationAtLod()` had, so normals were computed over the whole 3×3 mosaic.
+  Fixed in `elevation.yaml` (shared `sampleElevationTex()` remap, explicit LOD 0).
+- **Mirrored fallback is now transient.** `RasterSource::patchNeighborMosaics()`
+  copies real tile data over mirror-extrapolated mosaic cells in place as neighbor
+  tiles (including Phase 1 prefetches) arrive, and mosaics are shared/deduplicated
+  per TileID via a registry (`m_mosaics`) — also removing the per-Tile restitching
+  that drove the congestion finding.
+- **Two real stitching bugs found by visual testing:** (1) mosaic cell row placement
+  had N/S inverted (buffer rows run south→north, opposite to tile y — bright/dark
+  bands along horizontal tile boundaries); (2) node-registered 257×257 tiles share
+  their outermost row/col with neighbors, and naive tiling duplicated that line
+  (thin seams on all boundaries). Both fixed in `rasterSource.cpp`, covered by a
+  global-seamlessness unit test.
+- **Zoom continuity:** the shader pyramid is now anchored to continuous view zoom via
+  a fractional base LOD (`b = viewZoom − tileZoom`), with matching normalization, so
+  shading no longer jumps at tile-zoom transitions.
+- **Texture shading is now a user toggle** ("Texture shading" checkbox next to
+  "3D terrain") driving `global.elevation_mosaic`; the Lambertian hillshade stays
+  active underneath, and all texture-shading parameters (alpha, contrast, opacity,
+  levels, scale shift, blend mode) are GUI sliders in `hillshade.yaml` for Phase 5
+  tuning.

@@ -48,8 +48,12 @@ application:
             step: 100
             min: -9000
             max: 9000
-        # Texture shading (docs/texture-shading-plan.md Phase 3) - only has any visible effect when
-        #  ELEVATION_MOSAIC is enabled for the active elevation source (see elevation.yaml)
+        # Texture shading (docs/texture-shading-plan.md) - only has any visible effect when
+        #  ELEVATION_MOSAIC is enabled for the active elevation source (see elevation.yaml), i.e.
+        #  when the "Texture shading" checkbox is on. Balance against the normal hillshade via
+        #  "Hillshade Exaggeration" above (0 = texture shading only).
+        # Band-weight exponent (Brown's alpha, weight 2^(-k*alpha) for octave band k): lower =
+        #  broad landforms dominate, higher = fine detail dominates.
         u_texture_shading_alpha:
             style: hillshade
             label: Texture Shading Alpha
@@ -61,10 +65,36 @@ application:
             label: Texture Shading Contrast
             min: 0
             max: 5
-            step: 0.1
+            step: 0.05
+        # Overall strength of the texture-shading tint in the final composite.
         u_texture_shading_opacity:
             style: hillshade
             label: Texture Shading Opacity
+            min: 0
+            max: 1
+            step: 0.05
+        # Number of octave bands summed (pyramid depth): more levels = larger landforms
+        #  contribute (each level doubles the coarsest feature size).
+        u_texture_shading_levels:
+            style: hillshade
+            label: Texture Shading Levels
+            min: 1
+            max: 8
+            step: 1
+        # Shift all bands coarser (+) or finer (-) by fractional octaves: raise to emphasize
+        #  prominent ridges/valleys and suppress fine texture noise.
+        u_texture_shading_scale:
+            style: hillshade
+            label: Texture Shading Scale
+            min: -1
+            max: 3
+            step: 0.25
+        # Compositing mode: 0 = gray tint mix (classic standalone texture-shading look),
+        #  1 = multiply (darkens valleys/brightens ridges over the existing hillshade,
+        #  preserving its 3D effect); values between blend the two.
+        u_texture_shading_blend:
+            style: hillshade
+            label: Texture Shading Blend
             min: 0
             max: 1
             step: 0.05
@@ -101,29 +131,28 @@ styles:
                 METRIC_UNITS: global.metric_units
                 SHOW_CONTOURS: global.show_contours
                 SHOW_HYPSOMETRIC: global.show_hypsometric
-                # Laplacian-pyramid depth for texture shading (docs/texture-shading-plan.md Frozen
-                #  Interface Contract). Phase 4 finding against real (257x257) tiles + a single
-                #  mirrored/mirrored-and-rotated neighbor ring: "2^level <= W" alone is not a safe
-                #  bound -- a GPU mip level k box-filters over roughly a 2^k x 2^k footprint of the
-                #  *mosaic*, so even at k=7 (2^7=128, barely under W=257) the footprint at most points
-                #  in the tile -- not just near its edges -- already extends into the neighbor cells,
-                #  which are frequently synthesized via mirror-extrapolation (RasterSource, Phase 2)
-                #  rather than real data when a neighbor hasn't loaded yet (cold cache / fresh
-                #  pan/zoom). Since texture shading is a high-pass filter, it makes that synthetic
-                #  mirrored/180-rotated structure blatantly visible as a repeating, "rotated tile"
-                #  pattern -- something the gentle 3x3-texel Lambertian normal calc never exposed.
-                #  Keeping 2^level well under W/2 (not just under W) keeps the sampling footprint
-                #  mostly inside the tile's own real data for most pixels, greatly reducing reliance
-                #  on (possibly synthetic) neighbor cells. Revisit if/when a real shared cross-tile
-                #  mosaic (explicitly deferred, see plan's Non-goals) removes the mirroring entirely.
-                TEXTURE_SHADING_MAX_LEVELS: 4
+                # Hard compile-time cap on the Laplacian-pyramid loop for texture shading; the
+                #  *effective* depth is the u_texture_shading_levels uniform (GUI slider), clamped to
+                #  this. A mip level k box-filters roughly a 2^k x 2^k texel footprint of the mosaic,
+                #  so deeper levels read well into the neighbor cells; that's fine now that (a)
+                #  neighbor cells are patched with real tile data as prefetched neighbors arrive
+                #  (RasterSource::patchNeighborMosaics - mirror-extrapolated cells are only a brief
+                #  transient), and (b) the historical "kaleidoscope" artifact turned out to be
+                #  getElevationAt() missing the mosaic UV remap (fixed in elevation.yaml), not deep
+                #  mip levels.
+                TEXTURE_SHADING_MAX_LEVELS: 8
             uniforms:
                 u_exaggerate: 4.5
                 u_contour_color: global.contour_color
                 u_min_contour_elev: 0.0
                 u_texture_shading_alpha: 0.75
-                u_texture_shading_contrast: 0.05
-                u_texture_shading_opacity: 0.5
+                # contrast multiplies a dimensionless slope-like value (see textureShading()), so
+                #  its useful range is O(1) at any zoom level
+                u_texture_shading_contrast: 1.0
+                u_texture_shading_opacity: 0.7
+                u_texture_shading_levels: 6
+                u_texture_shading_scale: 0.0
+                u_texture_shading_blend: 1.0
                 # https://github.com/der-stefan/OpenTopoMap/blob/master/mapnik/relief_color_text_file.txt
                 # - stop offset in meters/10000
                 u_terrain_color: |
@@ -174,16 +203,34 @@ styles:
                     //  style). Block-merge order across mixed styles isn't guaranteed, so declare the
                     //  prototype here rather than rely on getElevationAtLod's definition coming first.
                     float getElevationAtLod(vec2 uv, float lod);
-                    float textureShading(vec2 uv) {
+                    float textureShading(vec2 uv, float texelMeters) {
+                        // anchor the pyramid to *continuous* view zoom, not the integer tile zoom:
+                        //  the fractional base lod b rises 0 -> 1 as the view zooms in across one tile
+                        //  zoom level (keeping each band's screen-space scale constant, via textureLod's
+                        //  trilinear filtering), and drops back by exactly 1 when tiles swap to the next
+                        //  zoom (u_tile_origin.w increments), so band k of the new tiles samples the
+                        //  same physical scale band k+1 did a moment earlier - no jump in the shading at
+                        //  tile-zoom transitions, and overzoomed tiles (tile zoom capped at the source's
+                        //  max_zoom) degrade smoothly too.
+                        // u_texture_shading_scale shifts the whole band range by (fractional) octaves:
+                        //  positive = coarser (emphasize broad ridge/valley landforms, suppress fine
+                        //  noise), negative = finer.
+                        float b = max(0.0, u_map_position.z - u_tile_origin.w) + u_texture_shading_scale;
                         float z = 0.0;
-                        float h_prev = getElevationAtLod(uv, 0.0);
+                        float h_prev = getElevationAtLod(uv, b);
                         for (int k = 0; k < TEXTURE_SHADING_MAX_LEVELS; k++) {
-                            float h_next = getElevationAtLod(uv, float(k + 1));
+                            if (float(k) >= u_texture_shading_levels) { break; }
+                            float h_next = getElevationAtLod(uv, b + float(k + 1));
                             // band k = LoD_k - LoD_(k+1), i.e. what mip level k+1's blur removes from level k
                             z += (h_prev - h_next) * pow(2.0, -float(k) * u_texture_shading_alpha);
                             h_prev = h_next;
                         }
-                        float az = u_texture_shading_contrast * z;
+                        // normalize the band sum (meters) by the ground size of the base band's sampling
+                        //  scale (texel spacing * 2^b, also continuous across tile-zoom swaps) to make it
+                        //  a dimensionless, slope-like quantity, so u_texture_shading_contrast behaves
+                        //  comparably at any zoom instead of multiplying raw meters (whose magnitude per
+                        //  band scales with the ground size of a texel)
+                        float az = u_texture_shading_contrast * z / (texelMeters * exp2(b));
                         return az / (2.0*sqrt(1.0 + az*az)) + 0.5;
                     }
                     #endif
@@ -191,6 +238,12 @@ styles:
                     // Using 9 texel patch, estimate 1st and 2nd deriv to smooth elevation and normal
                     vec2 st = currentRasterUV(ELEVATION_INDEX);
                     vec2 texwh = rasterPixelSize(ELEVATION_INDEX);
+                    #ifdef ELEVATION_MOSAIC
+                    // rasterPixelSize reports the full 3Wx3W mosaic; all the tile-local texel math
+                    //  below (texel centers, finite-difference offsets, meters-per-texel) wants the
+                    //  tile's own W. getElevationAt() itself does the mosaic UV remap.
+                    texwh /= 3.0;
+                    #endif
                     vec2 duv = 1./texwh;
                     vec2 ij = st * texwh;
                     // this fixes seams on raster tiles, but adds seams in polygons!
@@ -207,13 +260,16 @@ styles:
                     float h20 = getElevationAt(uv + vec2(duv.x, -duv.y));
                     float h21 = getElevationAt(uv + vec2(duv.x, 0.));
                     float h22 = getElevationAt(uv + duv);
-                    // handle edge of tile by extrapolating
+                    #ifndef ELEVATION_MOSAIC
+                    // handle edge of tile by extrapolating (with a mosaic, real neighbor-tile data
+                    //  exists beyond the tile edge, so the out-of-range samples above are valid)
                     bvec2 bot = lessThan(cen_ij, vec2(1.));
                     bvec2 top = greaterThan(cen_ij + 1., texwh);
                     if(bot.x) { h00 = 2.*h10 - h20; h01 = 2.*h11 - h21; h02 = 2.*h12 - h22; }
                     if(top.x) { h20 = 2.*h10 - h00; h21 = 2.*h11 - h01; h22 = 2.*h12 - h02; }
                     if(bot.y) { h00 = 2.*h01 - h02; h10 = 2.*h11 - h12; h20 = 2.*h21 - h22; }
                     if(top.y) { h02 = 2.*h01 - h00; h12 = 2.*h11 - h10; h22 = 2.*h21 - h20; }
+                    #endif
                     // proj meters per elevation tile pixel; note u_tile_origin.w is tile data zoom,
                     //  u_tile_origin.z is tile styling zoom, u_map_position.z is view zoom (float)
                     vec2 dxy_elev = 2.*3.141592*6378137.0*exp2(-u_tile_origin.w)*duv/u_raster_offsets[ELEVATION_INDEX].z;
@@ -231,6 +287,9 @@ styles:
                     vec2 grad = (grad0 + curv*f)/dxy_elev;
                     float elev = h11 + dot(f, grad0) + 0.5*dot(f, curv*f);  // 2nd order does help a bit w/ contour lines
                     // no underwater terrain for now
+                    // (in texture-shading mode the Lambertian relief stays active too - its strength
+                    //  is the existing u_exaggerate slider, texture shading blends over it in the
+                    //  color block, so the two can be balanced against each other from the GUI)
                     float hscale = elev > 0. ? u_exaggerate : 0.;  // /pow(u_meters_per_pixel, 0.7)/65536.;
                     normal = normalize(vec3(-hscale*grad/coslat, 1.));
                     // slope from gradient calculated above
@@ -296,28 +355,6 @@ styles:
                         base_color = mix(base_color, contour_color, min(cov, 1.));
                     }
                     #endif
-                    #ifdef ELEVATION_MOSAIC
-                    // texture shading (docs/texture-shading-plan.md Phase 3) - mirrors the tint-mixing
-                    //  pattern in slope-angle.yaml's color block; grayscale ts_tint modulates base_color
-                    //  the same way regardless of which base_color branch (raster/3D-terrain/2D-hillshade)
-                    //  is active above, scaled by u_texture_shading_opacity (0 = no visible effect).
-                    // Phase 4 fix (docs/texture-shading-plan.md): slope-angle.yaml's tint carries a
-                    //  *spatially-varying* alpha (tint.a from its gradient texture, ~0 on flat ground) so
-                    //  flat areas contribute ~nothing to the final `mix(color, base_color, base_color.a)`
-                    //  composite. The original texture-shading code instead passed the constant
-                    //  u_texture_shading_opacity as alpha everywhere, so even perfectly flat/neutral
-                    //  terrain (ts_shade == 0.5) got the same blend strength as a real ridge -- washing
-                    //  the entire map in flat gray instead of only tinting actual ridge/canyon structure.
-                    //  Scale alpha by the deviation of ts_shade from its neutral midpoint (0.5) instead.
-                    float ts_shade = textureShading(currentRasterUV(ELEVATION_INDEX));
-                    vec4 ts_tint = vec4(vec3(ts_shade), 1.0);
-                    float ts_alpha = abs(ts_shade - 0.5) * 2.0 * u_texture_shading_opacity;
-                    #ifdef HILLSHADE_BLEND_OVER
-                    base_color = mix(base_color, vec4(ts_tint.rgb, ts_alpha), 1.0/(1.0 + base_color.a));
-                    #else
-                    base_color = mix(base_color, ts_tint, ts_alpha);
-                    #endif
-                    #endif
                     // apply lighting to get final color
                     #ifdef HILLSHADE_BLEND_OVER
                     // for blending over background and opaque polygons; scale by 1/(1-light_accumulator_ambient) instead?
@@ -326,6 +363,32 @@ styles:
                     #else
                     color = calculateLighting(v_position.xyz, normal, base_color);
                     color = vec4(color.rgb, 1.0);
+                    #endif
+                    #ifdef ELEVATION_MOSAIC
+                    // texture shading (docs/texture-shading-plan.md) applied to the FINAL color, after
+                    //  Lambertian lighting/contours, so it composes identically over every base_color
+                    //  branch (raster / 3D-terrain / 2D blend-over) and can be balanced against the
+                    //  normal hillshade (whose strength stays on the u_exaggerate slider):
+                    //  - ts_shade: 0.5 = neutral, < 0.5 valleys/canyons, > 0.5 ridges
+                    //  - ts_w: blend weight, ~0 on flat/neutral ground (so texture shading only touches
+                    //    real relief structure, never washes flat areas), scaled by the opacity slider
+                    //  - u_texture_shading_blend selects the compositing mode, continuously:
+                    //    0 = "tint": mix color toward the gray shade value (strong standalone
+                    //        texture-shading look, but desaturates/washes the base),
+                    //    1 = "multiply": scale the existing color by 2*ts_shade (darkens valleys,
+                    //        brightens ridges, preserving the base hillshade's own 3D effect)
+                    // dxy_elev/coslat = true meters per elevation texel (from the normal block above)
+                    float ts_shade = textureShading(currentRasterUV(ELEVATION_INDEX), 0.5*(dxy_elev.x + dxy_elev.y)/coslat);
+                    float ts_w = abs(ts_shade - 0.5) * 2.0 * u_texture_shading_opacity;
+                    vec3 ts_tint = mix(color.rgb, vec3(ts_shade), ts_w);
+                    vec3 ts_mult = color.rgb * mix(1.0, 2.0*ts_shade, u_texture_shading_opacity);
+                    color.rgb = mix(ts_tint, ts_mult, u_texture_shading_blend);
+                    #ifdef HILLSHADE_BLEND_OVER
+                    // in 2D blend-over mode the hillshade layer composites over the basemap with its own
+                    //  alpha; make sure texture-shaded relief also shows through where the layer would
+                    //  otherwise be nearly transparent
+                    color.a = max(color.a, ts_w);
+                    #endif
                     #endif
                     // prevent duplicate call to calculateLighting()
                     #undef TANGRAM_LIGHTING_FRAGMENT
