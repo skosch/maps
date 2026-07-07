@@ -126,6 +126,18 @@ styles:
                 color: |
                     base_color.rgb = mix(base_color.rgb, u_base_mix_color.rgb, u_base_mix_color.a);
 
+    # Opaque terrain-following ground plane, drawn below all map polygons (see layers.earth.ground).
+    # With 3D terrain this is the surface of the terrain itself (the hillshade style is now translucent
+    #  in 3D, blending shading over land cover polygons exactly as in 2D, so an opaque backdrop is
+    #  needed to keep mountains from being see-through); in 2D it's a single flat quad per tile
+    #  (RasterStyle uses a 1x1 grid without an ElevationManager) matching the scene background color,
+    #  so it is effectively free and can stay enabled in both modes.
+    terrain-ground:
+        base: raster
+        mix: [ global.terrain_3d_mixin, get-elevation ]
+        raster: custom
+        lighting: false
+
     hillshade:
         base: raster
         mix: [ global.terrain_3d_mixin, get-elevation ]
@@ -154,8 +166,11 @@ styles:
                 u_contour_color: global.contour_color
                 u_min_contour_elev: 0.0
                 # band-weight exponent at high zoom (>= z13) / low zoom (<= z10.5); interpolated
-                #  in between - see textureShading()
-                u_texture_shading_alpha: 2.0
+                #  in between - see textureShading(). Low values emphasize broad landforms; 0.6
+                #  reads much better than the old 2.0 default (which buried landform structure
+                #  under fine texture noise) now that low-alpha tile seams are fixed by the
+                #  blur-footprint cap in getElevationAtLod (elevation.yaml)
+                u_texture_shading_alpha: 0.6
                 u_texture_shading_alpha_min: 0.5
                 # contrast multiplies a dimensionless slope-like value (see textureShading()), so
                 #  its useful range is O(1) at any zoom level
@@ -317,13 +332,25 @@ styles:
                     vec4 contour_color = u_contour_color;
                     #if ELEVATION_INDEX
                     vec4 base_color = sampleRaster(0);
-                    #elif defined(TANGRAM_TERRAIN_3D)
-                    vec4 base_color = vec4(0.88, 0.88, 0.88, 1.0);
                     #else
+                    // Standalone hillshade over a vector base map: translucent shading blended over the
+                    //  polygons below, in 3D exactly as in 2D (the opaque terrain surface behind the
+                    //  polygons is provided by the terrain-ground style / layers.earth draw rule, so
+                    //  land cover coloring stays visible in both modes).
                     #define HILLSHADE_BLEND_OVER
                     vec4 shading = calculateLighting(v_position.xyz, normal, vec4(1.0));
                     vec4 base_color = vec4(0.0, 0.0, 0.0, 0.0);  //v_color;
                     contour_color = shading*contour_color;
+                    #endif
+                    // With 3D terrain, the geometry itself conveys relief once the camera tilts away
+                    //  from zenith, so hillshading (and texture shading - see the color block) fades out
+                    //  linearly with view angle: full strength looking straight down (indistinguishable
+                    //  from 2D), completely gone by 45 deg tilt where perspective makes the terrain
+                    //  shape plainly visible. u_view[2][2] = cos(camera pitch), cf. fog in terrain-3d.yaml.
+                    #if defined(TANGRAM_TERRAIN_3D) && defined(HILLSHADE_BLEND_OVER)
+                    float shade_fade = clamp(1.0 - degrees(acos(clamp(u_view[2][2], 0.0, 1.0)))/45.0, 0.0, 1.0);
+                    #else
+                    const float shade_fade = 1.0;
                     #endif
                 color: |
                     #ifdef SHOW_CONTOURS
@@ -376,7 +403,9 @@ styles:
                     // apply lighting to get final color
                     #ifdef HILLSHADE_BLEND_OVER
                     // for blending over background and opaque polygons; scale by 1/(1-light_accumulator_ambient) instead?
-                    color = vec4(4.0*shading.rgb - 3.0, 0.25);
+                    // shade_fade (normal block) fades the Lambertian relief with view angle in 3D;
+                    //  contours/hypsometric tint (in base_color) are unaffected
+                    color = vec4(4.0*shading.rgb - 3.0, 0.25*shade_fade);
                     color = mix(color, base_color, base_color.a);
                     #else
                     color = calculateLighting(v_position.xyz, normal, base_color);
@@ -397,9 +426,12 @@ styles:
                     //        brightens ridges, preserving the base hillshade's own 3D effect)
                     // dxy_elev/coslat = true meters per elevation texel (from the normal block above)
                     float ts_shade = textureShading(currentRasterUV(ELEVATION_INDEX), 0.5*(dxy_elev.x + dxy_elev.y)/coslat);
-                    float ts_w = abs(ts_shade - 0.5) * 2.0 * u_texture_shading_opacity;
+                    // shade_fade (normal block): texture shading fades out with view tilt in 3D just
+                    //  like the Lambertian relief above (1.0 in 2D and for raster-base styles)
+                    float ts_op = u_texture_shading_opacity * shade_fade;
+                    float ts_w = abs(ts_shade - 0.5) * 2.0 * ts_op;
                     vec3 ts_tint = mix(color.rgb, vec3(ts_shade), ts_w);
-                    vec3 ts_mult = color.rgb * mix(1.0, 2.0*ts_shade, u_texture_shading_opacity);
+                    vec3 ts_mult = color.rgb * mix(1.0, 2.0*ts_shade, ts_op);
                     color.rgb = mix(ts_tint, ts_mult, u_texture_shading_blend);
                     #ifdef HILLSHADE_BLEND_OVER
                     // in 2D blend-over mode the hillshade layer composites over the basemap with its own
@@ -430,7 +462,12 @@ layers:
     earth:
         enabled: false  # enabled by update from mapsources.yaml entry (only for vector base map)
         data: { source: elevation }
-        draw: { hillshade: { color: global.earth_color, order: global.earth_order } }
+        draw:
+            hillshade: { color: global.earth_color, order: global.earth_order }
+            # opaque terrain surface below all polygons (landuse starts at order 510); the hillshade
+            #  rule above blends shading over land cover / landuse polygons from its order (599) above
+            #  them, identically in 2D and 3D - see the terrain-ground style
+            terrain-ground: { color: global.earth_color, order: 50 }
 
     contour-labels:
         data: { source: elevation }

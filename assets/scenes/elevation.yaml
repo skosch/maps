@@ -92,7 +92,18 @@ styles:
                     //  chain over this mosaic gives real (non-aliased) multi-scale low-pass elevation
                     //  samples, used by textureShading() in hillshade.yaml to build a Laplacian pyramid.
                     float getElevationAtLod(vec2 uv, float lod) {  // in meters; uv is tile-local [0,1]
-                        vec4 h = textureLod(u_rasters[ELEVATION_INDEX], elevationMosaicUV(uv), lod);
+                        // Cap the blur footprint at ~one tile width: adjacent tiles' mosaics are built
+                        //  independently and share only 2 of their 3 cell columns/rows, so once a
+                        //  bilinear mip sample's footprint (~1.5 * 2^lod texels) reaches past the
+                        //  one-tile neighbor ring, the two tiles integrate over different data at the
+                        //  same world point and their shading disagrees -> visible tile seams (worst at
+                        //  low alpha, which weights the deepest bands most). Capping lod so the
+                        //  footprint stays within +/- Wp of any pixel of the center tile keeps every
+                        //  band consistent across the shared edge; deeper bands then difference to zero
+                        //  in textureShading()'s pyramid, smoothly fading out instead of seaming.
+                        //  log2(1.5) ~ 0.585; Wp = rasterPixelSize/3 (see elevationMosaicUV above).
+                        float maxLod = log2(rasterPixelSize(ELEVATION_INDEX).x / 3.0) - 0.585;
+                        vec4 h = textureLod(u_rasters[ELEVATION_INDEX], elevationMosaicUV(uv), min(lod, maxLod));
                     #ifdef ELEVATION_FLOAT_TEX
                         return h.r;
                     #else

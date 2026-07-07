@@ -391,11 +391,14 @@ styles:
         mix: global.terrain_3d_mixin
         lighting: false
 
-    # water polygons can be assumed to be flat (not quite true for rivers), so only need to set elevation at edges
+    # with 3D terrain, terrain_grid tessellates polygons on the terrain mesh grid (64, see
+    #  rasterStyle.cpp/builders.cpp) so per-vertex elevation drapes them accurately over the terrain -
+    #  critical for land cover / landuse polygons spanning significant relief; no effect in 2D
     unlit-polygons:
         base: polygons
         mix: global.terrain_3d_mixin
         lighting: false
+        terrain_grid: true
 
     ocean-polygons:
         base: polygons

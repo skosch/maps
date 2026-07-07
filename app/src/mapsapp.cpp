@@ -2319,6 +2319,10 @@ bool MapsApp::loadConfig(const char* assetPath)
       Tangram::YamlUtil::mergeMapFields(newconfig, std::move(config));
       config = std::move(newconfig);
     }
+    // land cover polygons now drape over 3D terrain (see hillshade.yaml), so drop the obsolete
+    //  default update (carried over from older versions' config.default.yaml) that hid them in 3D
+    if(config["terrain_3d"]["updates"].has("global.show_land_polygons"))
+      config["terrain_3d"]["updates"].remove("global.show_land_polygons");
   }
 
   return prevVersion < versionCode;

@@ -517,3 +517,52 @@ The Phase 4 findings above are superseded as follows:
   active underneath, and all texture-shading parameters (alpha, contrast, opacity,
   levels, scale shift, blend mode) are GUI sliders in `hillshade.yaml` for Phase 5
   tuning.
+
+### Land cover in 2D/3D + tile-seam fixes (2026-07-06)
+
+Follow-up work on this branch, building on the texture-shading integration:
+
+- **Land cover with 3D terrain.** `stylus-bike-hike` (and every vector base + hillshade
+  combination) now shows land cover / landuse polygons in 3D as well as 2D:
+  - The standalone `hillshade` style renders the same translucent blend-over shading in 3D
+    that it always did in 2D (the opaque `vec4(0.88,...)` 3D branch is gone); the opaque
+    terrain surface behind the polygons comes from a new `terrain-ground` raster style /
+    `layers.earth` draw rule at order 50 (below all polygons; in 2D it degenerates to a flat
+    quad matching the background color). Land cover polygons (orders 510-590) draw between
+    the ground and the shading, identically composited in 2D and 3D.
+  - The old `terrain_3d: updates: global.show_land_polygons: false` default is removed from
+    `config.default.yaml`, and `MapsApp::loadConfig()` drops the stale key from existing
+    user configs on version upgrade.
+  - **Polygon grid tessellation** (`terrain_grid` style parameter, set on `unlit-polygons`;
+    `PolygonBuilder::gridRes`, active only when the scene has an `ElevationManager`): the
+    whole polygon is earcut as usual, then each output triangle is clipped along the tile's
+    64x64 grid lines (matching the `RasterStyle` terrain mesh resolution; clipping triangles
+    keeps every piece convex, which Sutherland-Hodgman handles exactly - clipping the
+    non-convex *rings* per cell instead produced degenerate bridge geometry and mixed-winding
+    earcut output that face culling then swallowed). Cells fully inside a triangle are
+    emitted with the terrain mesh's own diagonal orientation, so the draped surface matches
+    the terrain surface exactly there; per-vertex elevation then keeps big landuse polygons
+    on the terrain at any distance instead of letting ridges poke through (or the polygon
+    paint over ridges in front of it). Unit tests: `tests/unit/buildersTests.cpp`.
+- **View-angle fade.** With 3D terrain, hillshading and texture shading fade out linearly
+  with camera tilt (full strength at zenith, gone at >= 45 deg, `shade_fade` in
+  hillshade.yaml) - the 3D geometry itself conveys relief once the camera is tilted;
+  contours and hypsometric tint are unaffected.
+- **Tile-seam root cause (the "still some edge artefacts" report).** Two fixes:
+  1. The dominant, deterministic seam on every boundary: `RasterSource::m_textures` holds
+     only weak refs, and Tiles reference the *mosaic* instead of the original per-tile
+     texture, so the original expired as soon as its mosaic was stitched; any neighbor
+     stitched later couldn't find the (still rendered!) tile's data and permanently used
+     mirror-extrapolation for that cell (`patchNeighborMosaics()` only fires on newly cached
+     tiles). Mirrored-vs-real content in adjacent mosaics diverges within a few texels of
+     the shared edge, so even the finest bands seamed. Fixed by keeping the original texture
+     alive via `mosaic->userData`. Verified byte-identical shared cells (instrumented
+     comparison: max diff went from ~1200 m to 0) and gradient-spike-free boundaries.
+  2. Defense in depth for the deepest bands: `getElevationAtLod()` caps the mip LOD so the
+     bilinear footprint (~1.5 * 2^lod texels) stays within +/- one tile of the pixel - past
+     that, adjacent tiles' independently-built mosaics integrate over different data (they
+     share only 2 of 3 mosaic cells) and cannot agree; capped bands difference to zero and
+     fade out instead of seaming. This also excludes the NPOT 3x3 -> 1x1 mip tail.
+- **Default `u_texture_shading_alpha` is now 0.6** (was 2.0): broad-landform emphasis reads
+  far better and no longer washes out land cover colors on steep terrain, and is viable now
+  that the low-alpha (deep-band) seams above are fixed.
