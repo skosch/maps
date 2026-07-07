@@ -30,6 +30,10 @@ styles:
             blocks:
                 filter: |
                     #ifdef TANGRAM_TERRAIN_3D
+                    // Aerial perspective, part 1: color mix toward the atmosphere color with distance.
+                    //  Part 2 (shading-contrast attenuation with the same haze factor) lives in
+                    //  hillshade.yaml's color block, which duplicates this formula because the filter
+                    //  block runs after color - keep the two in sync (docs/terrain-illumination-plan.md).
                     // note v_position.z < 0
                     float cospitch = u_view[2][2];
                     float eyeh = -u_view[3][2];  // distance from eye to map center

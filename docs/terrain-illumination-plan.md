@@ -243,3 +243,159 @@ texture fetches, so mobile cost is a handful of ALU ops.
   above prior — why screen-anchored top-left light is non-negotiable).
 - T. Patterson, shadedrelief.com — practical haze/aerial perspective recipes.
 - B. Jenny, "An interactive approach to analytical relief shading", *Cartographica* 2001.
+
+## Results (implemented 2026-07-07)
+
+All phases A–D implemented in `assets/scenes/hillshade.yaml` (the morph, occlusion, sun, and
+haze-contrast terms, ~140 new lines in the `normal`/`color`/`global` blocks + 7 new
+`gui_variables` sliders) and `assets/scenes/terrain-3d.yaml` (a doc comment cross-referencing
+the duplicated haze formula in the `color` block, since the `filter` block that owns the
+color-mix fog runs after `color`). `shade_fade` is gone; `tilt_morph` (0 at zenith, 1 by 45°)
+selects between the unchanged 2D-look layer and the new oblique-illumination layer.
+
+**Tuned defaults** (all exposed as GUI sliders, see the table in the plan above for meaning):
+`u_sky_weight=0.65`, `u_sun_weight=0.35`, `u_occ_strength=0.8`, `u_occ_min=0.55`,
+`u_shade3d_alpha=0.35`, `u_shade3d_gain=4.5`, `u_haze_contrast=0.6`. These matched the plan's
+starting-point table closely; no further retuning was needed after visual review of the full
+validation matrix.
+
+**Validation:**
+- *Zenith continuity (Phase A contract).* 3D-at-tilt-0 vs. pure 2D: open water is
+  pixel-near-identical (mean abs diff 0.6/255, only 4% of water pixels differ by >10, and
+  those are coastline AA edges). Land areas show a **structured, ~1px edge/contour-line
+  diff pattern** (heatmap traced every contour line and hillshade-texture edge, not a
+  uniform brightness/color shift) — this is a **pre-existing** artifact of the raster mesh
+  resolution difference (`RasterStyle::build()`: 64×64 grid whenever an `ElevationManager`
+  exists — i.e. whenever 3D terrain is toggled on, regardless of tilt — vs. a single flat
+  quad in pure 2D; `tangram-es/core/src/style/rasterStyle.cpp`), which changes per-fragment
+  UV derivatives and hence implicit mip/AA selection on `sampleRaster(0)`/contour lines. It
+  predates this session's work (present since the original terrain-3D mosaic integration)
+  and is orthogonal to the illumination model — colors, shading structure, and relief are
+  otherwise identical. Not fixed here; flagged as a minor follow-up (candidate fix: force an
+  explicit LOD/derivative on the raster-base sample path when `TANGRAM_TERRAIN_3D` is
+  defined, so mip selection doesn't depend on mesh density).
+- *Contrast retention (Phase B, "must not wash out").* Local-contrast proxy (mean magnitude
+  of a discrete Laplacian over a mountain-heavy crop) at rotation 0, tilt 0/25/45/60°:
+  Howe Sound `40.1 / 36.9 / 38.2 / 41.8`, Lions `25.0 / 27.6 / 33.4 / 34.4`. Contrast at 60°
+  tilt is **104–138% of the zenith value** — comfortably above the plan's ≥70% bar, and in
+  the *right* direction (the original bug was contrast collapsing to ~0 by 45°; the new
+  model if anything gains legibility at higher tilt, which reads correctly rather than as
+  over-sharpening in the reviewed screenshots).
+- *Rotation matrix (Phase C).* Full 4 tilt × 4 rotation × 2 location grid (32 shots) captured
+  and reviewed as montages (`testenv-illum/shots/montage-{howe,lions}.png`). No relief
+  inversion, no flattening, no discontinuity visible at any tilt/rotation combination.
+  Ridge/valley polarity is additionally guaranteed **by construction**: the dominant sky
+  term depends only on `normal.z` (view/rotation-independent), and the occlusion proxy
+  (`ts_shade`) is computed from the elevation raster alone, not from the view matrix — so
+  ridges (high sky exposure) cannot become darker than valleys (low sky exposure) under any
+  rotation. The sun term is a bounded secondary contributor (`u_sun_weight=0.35`) with its
+  world elevation angle clamped to [20°,70°], so it can perturb but never invert the
+  sky-driven base relief.
+
+## "White patches" bug — diagnosed and fixed (2026-07-07)
+
+Reported by the user in the Swiss Alps (Engadin) at moderate-to-high 3D tilt: large,
+sharply-bounded, pale/flat rectangular patches breaking up an otherwise well-shaded
+mountainside (see the reported screenshot: a patch roughly the size of one map tile, near
+Piz Pradatsch).
+
+**Root cause**, confirmed directly from an existing code comment in
+`tangram-es/core/src/data/rasterSource.cpp` (`RasterTileTask::addRaster()`, predates this
+session — part of the original Phase 4 mosaic-congestion mitigation): proxy tiles (a
+lower-zoom tile shown as a temporary placeholder while its full-resolution replacement is
+still loading) are deliberately never given a stitched elevation mosaic, to avoid the
+Phase-4 tile-worker congestion (see `docs/texture-shading-plan.md`). They render with the
+**plain per-tile texture** instead. But `ELEVATION_MOSAIC` is a scene-wide shader compile
+flag (on whenever texture shading is enabled) — every raster sample, proxy tiles included,
+runs through `elevationMosaicUV()` (`assets/scenes/elevation.yaml`), which unconditionally
+assumes the bound texture is a 3W×3W mosaic and remaps into its middle third. Fed a
+plain, single-tile-sized texture instead, that remap reads roughly the wrong 1/9 of the
+texture — producing flat, wrongly-shaded, often pale output over exactly the tiles that are
+proxies. The original author's own comment called this "an acceptable, transient cost given
+proxy tiles are onscreen only until the real tile replaces them" — a fair judgment call at
+the time, but `docs/tile-pipeline-perf-plan.md` (companion work landing alongside this)
+shows panning/loading is slow enough in practice that proxies now persist far longer than
+"transient," making the artifact clearly visible — exactly matching the user's report and
+their own suspicion ("data or rendering capability missing").
+
+**Fix** (`tangram-es/core/src/data/rasterSource.{h,cpp}`): factored the mosaic registry
+lookup out of `buildElevationMosaic()` into a new cheap, reuse-only `getExistingMosaic()`
+(one hash lookup + `weak_ptr::lock()`, no stitching). `RasterTileTask::addRaster()` now
+calls this for proxy tiles instead of skipping mosaic assignment entirely — during ordinary
+panning a nearby visible tile has usually already triggered a real stitch for the same
+`TileID`, so the proxy picks up correct, current mosaic data for free. The **expensive**
+full stitch (8 `getTexture()` lookups + fresh 3W×3W CPU buffer) still never runs for proxy
+tasks, so the original Phase-4 congestion fix is fully preserved — this only adds a cheap
+map lookup on the already-cheap path. Falls back to the plain texture (the old, "acceptable
+transient" behavior) only when truly no mosaic exists anywhere nearby yet.
+
+Verified: rebuilt and re-tested at the reported Engadin location (45° tilt) and, as a harder
+test, a **never-before-cached** Dolomites location with only a 12-second load window before
+screenshotting (deliberately catching tiles mid-load, i.e. while still proxies) at 50° tilt
+— clean, fully-shaded relief with no patches in either case (`testenv-bug2/shots/
+dolomites-fastload-t50.png`).
+
+**Secondary defensive fix, same investigation** (`tangram-es/core/src/util/builders.cpp`,
+`buildPolygonGrid`): the grid-tessellation vertex budget guard used to silently drop the
+remainder of a polygon once `numVertices` exceeded 65200 — for a single giant, complex
+alpine `natural=bare_rock`/`scree` polygon (plausible in the Alps) this could leave a real
+hole showing the earth-color background through, another way to produce a "white patch."
+Not confirmed as the cause of the reported bug (no truncation fired in either repro), but
+fixed regardless since it's cheap and a real correctness gap: the budget check now runs once
+per *earcut* triangle (not per emitted grid triangle), and once near the limit, remaining
+triangles are emitted **whole and undraped** (like the plain non-gridded path) instead of
+being dropped — guaranteeing full polygon coverage at worst-case degraded drape quality,
+never a hole. Covered by the existing `tests/unit/buildersTests.cpp` suite (all 5 cases
+still pass) plus manual reasoning about the new fallback path; a dedicated large-polygon unit
+test was not added (would need a pathological synthetic polygon with thousands of points to
+actually trigger the budget — lower priority than the fix itself).
+
+## Second, distinct "white patches" phenomenon — diagnosed, NOT fixed (2026-07-07)
+
+After the proxy-mosaic fix above, the user reported patches persisting in a different,
+visually distinct form: fine, mottled, high-frequency white/pale speckles closely following
+gully and couloir shapes on near-vertical rock faces (Tre Cime di Lavaredo, Dolomites) —
+qualitatively different from the first bug's large, sharp-edged, tile-sized blob (Engadin).
+This is a **separate, pre-existing phenomenon**, confirmed unrelated to this session's work:
+
+**Diagnosis.** Reproduced identically in **pure 2D mode** (`--terrain_3d.enabled false`) at
+the same coordinates — i.e. it has nothing to do with 3D terrain, the oblique illumination
+morph, texture shading, or the mosaic architecture (all independently ruled out: disabling
+texture shading, disabling contours, and recoloring the `bare_rock` landuse fill to a
+conspicuous debug color all left the pattern completely unchanged). It is the classic
+Lambertian hillshade (`normal` block, `calculateLighting`, unchanged since long before this
+session) **clipping to solid white on steep terrain**: with `light1`/`light2` combined
+(ambient `0.35` each + diffuse `0.2` each = max raw shading `1.1`) and the
+`color = vec4(4.0*shading.rgb - 3.0, 0.25)` compositing trick (`hillshade.yaml` "apply
+lighting to get final color"), any raw `shading` above `1.0` clips the composited color to
+solid white — a threshold easily crossed on well-lit slope orientations, and more so where
+`u_exaggerate=4.5` amplifies the per-fragment normal from noisy elevation gradients, which is
+common on near-vertical/overhanging alpine terrain (a known limitation of single-valued
+raster DEMs: they cannot represent true overhangs, so photogrammetric/radar-derived DEM
+sources like the ArcGIS `WorldElevation3D` one this scene uses commonly have locally noisy or
+smeared elevation values on cliff faces, producing locally extreme gradients even before
+`u_exaggerate`). This is a real, longstanding characteristic of the analytical-hillshading
+approach on cliffs (well documented in cartography — e.g. why many hand- and
+computer-shaded relief maps use separate rock-hachure or cliff symbolization rather than
+relying on continuous hillshade at near-90° slopes), not a regression introduced by the
+mosaic/proxy work, the grid tessellation, or the illumination morph in this session.
+
+**Not fixed here** — this needs a deliberate, separately-tuned change to the base Lambertian
+term itself (e.g. soft-clamp/tone-map `shading` before the `4x-3` remap instead of a hard
+clip, or a Minnaert-style correction that rolls off contribution as slope approaches
+vertical, or reducing `u_exaggerate`'s effect on near-vertical fragments specifically) that
+deserves its own tuning pass across multiple steep-terrain locations, independent of the
+oblique-illumination work above. Flagging as a follow-up rather than rushing a fix into this
+already-large change.
+
+**Related, kept regardless.** While investigating, the oblique-illumination `L3` term's
+normalization was tightened: it previously divided by a flat-ground-relative reference
+(`sun_flat`, using the sun's dot product with a purely flat normal), which a steeply-tilted
+slope facing the sun more directly than flat ground ever can could exceed — an analogous
+(but distinct, and confirmed via direct A/B test to NOT be the cause of the reported
+patches) clipping risk in the *new* code. Changed to divide by the fixed theoretical maximum
+of the numerator (`sky<=1, occ<=1.15, sun<=1`) instead, which bounds `L3` (and therefore
+`color3d`) to `[0,1]` for every normal and every rotation by construction — strictly more
+correct than the old formula even though it wasn't the culprit for this bug. Verified via
+direct A/B screenshot at the same location (identical output before/after — confirming this
+term was not the source of the visible artifact, while still being a real hardening).

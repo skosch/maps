@@ -106,6 +106,59 @@ application:
             min: 0
             max: 1
             step: 0.05
+        # 2D->3D illumination morph (docs/terrain-illumination-plan.md): with 3D terrain, the
+        #  zenith view keeps the exact 2D cartographic look, and tilting morphs into an oblique
+        #  illumination model - CIE-overcast sky (azimuth-free, rotation-proof) x an occlusion
+        #  proxy from the texture-shading pyramid (SVF-like) + a soft screen-anchored sun.
+        #  These sliders only affect tilted 3D views.
+        u_sky_weight:
+            style: hillshade
+            label: 3D Sky Light Weight
+            min: 0
+            max: 1
+            step: 0.05
+        u_sun_weight:
+            style: hillshade
+            label: 3D Sun Light Weight
+            min: 0
+            max: 1
+            step: 0.05
+        # amplitude of the texture-shading-derived occlusion (valleys darker, ridges brighter)
+        #  and the floor it clamps to (valley-floor darkness limit)
+        u_occ_strength:
+            style: hillshade
+            label: 3D Occlusion Strength
+            min: 0
+            max: 2
+            step: 0.05
+        u_occ_min:
+            style: hillshade
+            label: 3D Occlusion Min
+            min: 0
+            max: 1
+            step: 0.05
+        # overall strength of the oblique shading layer: alpha of the translucent blend-over,
+        #  and contrast gain (rgb = gain*L - (gain-1), the same trick as the 2D 4*shading-3)
+        u_shade3d_alpha:
+            style: hillshade
+            label: 3D Shade Alpha
+            min: 0
+            max: 1
+            step: 0.05
+        u_shade3d_gain:
+            style: hillshade
+            label: 3D Shade Gain
+            min: 1
+            max: 8
+            step: 0.25
+        # aerial perspective: how much distance haze flattens shading contrast (the color fog
+        #  mix itself lives in terrain-3d.yaml's fog style)
+        u_haze_contrast:
+            style: hillshade
+            label: 3D Haze Contrast Atten
+            min: 0
+            max: 1
+            step: 0.05
 
 
 styles:
@@ -183,6 +236,20 @@ styles:
                 u_texture_shading_levels: 6
                 u_texture_shading_scale: 1.25
                 u_texture_shading_blend: 1.0
+                # 2D->3D illumination morph knobs (docs/terrain-illumination-plan.md; only used
+                #  when TANGRAM_TERRAIN_3D and the camera is tilted - see the color block):
+                # overcast-sky vs. screen-anchored-sun balance of the oblique illumination
+                u_sky_weight: 0.65
+                u_sun_weight: 0.35
+                # SVF-style occlusion proxy from the texture-shading pyramid: amplitude and
+                #  valley-floor clamp
+                u_occ_strength: 0.8
+                u_occ_min: 0.55
+                # translucent blend-over strength/gain of the oblique layer (2D uses 0.25 / 4.0)
+                u_shade3d_alpha: 0.35
+                u_shade3d_gain: 4.5
+                # aerial perspective: fraction of shading contrast removed at full haze
+                u_haze_contrast: 0.6
                 # https://github.com/der-stefan/OpenTopoMap/blob/master/mapnik/relief_color_text_file.txt
                 # - stop offset in meters/10000
                 u_terrain_color: |
@@ -346,15 +413,16 @@ styles:
                     vec4 base_color = vec4(0.0, 0.0, 0.0, 0.0);  //v_color;
                     contour_color = shading*contour_color;
                     #endif
-                    // With 3D terrain, the geometry itself conveys relief once the camera tilts away
-                    //  from zenith, so hillshading (and texture shading - see the color block) fades out
-                    //  linearly with view angle: full strength looking straight down (indistinguishable
-                    //  from 2D), completely gone by 45 deg tilt where perspective makes the terrain
-                    //  shape plainly visible. u_view[2][2] = cos(camera pitch), cf. fog in terrain-3d.yaml.
+                    // With 3D terrain, shading MORPHS with camera tilt instead of fading out
+                    //  (docs/terrain-illumination-plan.md): tilt_morph is 0 at zenith (the output is
+                    //  then exactly the 2D cartographic look) and reaches 1 by 45 deg tilt, where the
+                    //  oblique illumination model built in the color block (CIE-overcast sky x
+                    //  pyramid-based occlusion + soft screen-anchored sun, with aerial-perspective
+                    //  contrast attenuation) fully replaces it. Shading is the primary shape-from-X
+                    //  cue - simply fading it out left tilted terrain flat and unreadable.
+                    //  u_view[2][2] = cos(camera pitch), cf. fog in terrain-3d.yaml.
                     #if defined(TANGRAM_TERRAIN_3D) && defined(HILLSHADE_BLEND_OVER)
-                    float shade_fade = clamp(1.0 - degrees(acos(clamp(u_view[2][2], 0.0, 1.0)))/45.0, 0.0, 1.0);
-                    #else
-                    const float shade_fade = 1.0;
+                    float tilt_morph = smoothstep(0.0, radians(45.0), acos(clamp(u_view[2][2], 0.0, 1.0)));
                     #endif
                 color: |
                     #ifdef SHOW_CONTOURS
@@ -407,9 +475,10 @@ styles:
                     // apply lighting to get final color
                     #ifdef HILLSHADE_BLEND_OVER
                     // for blending over background and opaque polygons; scale by 1/(1-light_accumulator_ambient) instead?
-                    // shade_fade (normal block) fades the Lambertian relief with view angle in 3D;
-                    //  contours/hypsometric tint (in base_color) are unaffected
-                    color = vec4(4.0*shading.rgb - 3.0, 0.25*shade_fade);
+                    // contours/hypsometric tint (in base_color) composite over the shading and are
+                    //  tilt-independent; in 3D this whole 2D-look layer is morphed toward the oblique
+                    //  illumination below with tilt_morph
+                    color = vec4(4.0*shading.rgb - 3.0, 0.25);
                     color = mix(color, base_color, base_color.a);
                     #else
                     color = calculateLighting(v_position.xyz, normal, base_color);
@@ -430,9 +499,11 @@ styles:
                     //        brightens ridges, preserving the base hillshade's own 3D effect)
                     // dxy_elev/coslat = true meters per elevation texel (from the normal block above)
                     float ts_shade = textureShading(currentRasterUV(ELEVATION_INDEX), 0.5*(dxy_elev.x + dxy_elev.y)/coslat);
-                    // shade_fade (normal block): texture shading fades out with view tilt in 3D just
-                    //  like the Lambertian relief above (1.0 in 2D and for raster-base styles)
-                    float ts_op = u_texture_shading_opacity * shade_fade;
+                    // (in 3D the screen-space ts tint/multiply below fades with tilt automatically via
+                    //  the tilt_morph mix at the end - but ts_shade itself lives on at all tilts as the
+                    //  occlusion proxy of the oblique illumination, so prominence highlighting never
+                    //  disappears)
+                    float ts_op = u_texture_shading_opacity;
                     float ts_w = abs(ts_shade - 0.5) * 2.0 * ts_op;
                     vec3 ts_tint = mix(color.rgb, vec3(ts_shade), ts_w);
                     vec3 ts_mult = color.rgb * mix(1.0, 2.0*ts_shade, ts_op);
@@ -443,6 +514,65 @@ styles:
                     //  otherwise be nearly transparent
                     color.a = max(color.a, ts_w);
                     #endif
+                    #endif
+                    #if defined(TANGRAM_TERRAIN_3D) && defined(HILLSHADE_BLEND_OVER)
+                    // Oblique illumination for tilted 3D views (docs/terrain-illumination-plan.md),
+                    //  blended in with tilt_morph (normal block; == 0 at zenith, so the zenith render
+                    //  stays bit-identical to the 2D cartographic look above). Three ingredients:
+                    //  1. CIE-overcast sky irradiance (zenith 3x brighter than horizon): depends only
+                    //     on normal.z, so it is azimuth-free and cannot invert under rotation.
+                    //  2. Occlusion proxy: Brown's texture shading is a multiscale curvature operator -
+                    //     ridges (ts_shade > 0.5) see more sky, canyons less - i.e. a cheap sky-view
+                    //     factor already computed per fragment; it multiplies the sky term.
+                    //  3. Soft screen-anchored sun (upper-left of the SCREEN, like light2 of the 2D
+                    //     look): keeps the top-left light convention under any rotation - no relief
+                    //     inversion - with half-Lambert wrap so back slopes stay readable.
+                    //  Aerial perspective: distance haze (same formula as the fog in terrain-3d.yaml,
+                    //  computed here because the fog filter block runs after color) attenuates shading
+                    //  contrast per-fragment, layering near-crisp / far-flat depth.
+                    // note v_position.z < 0; u_view[3][2] = -(distance from eye to map center).
+                    //  The 8x density makes shading contrast fall off much faster than the color fog:
+                    //  with the default u_fog_density (0.1) the color fog only reaches ~0.1-0.2 at the
+                    //  most distant terrain, which is right for color but imperceptible as a contrast
+                    //  change - and aerial perspective flattens contrast well before it whitens hues
+                    //  (Imhof's luftperspektive; measured on the Howe Sound 60-deg test view).
+                    float haze = 1.0 - clamp(exp(8.0 * u_fog_density * v_position.z/(-u_view[3][2])/(u_view[2][2] + 0.5)), 0.0, 1.0);
+                    #ifdef ELEVATION_MOSAIC
+                    float occ = clamp(1.0 + u_occ_strength * (2.0*ts_shade - 1.0), u_occ_min, 1.15);
+                    occ = mix(occ, 1.0, u_haze_contrast * haze);
+                    #else
+                    const float occ = 1.0;
+                    #endif
+                    // CIE overcast: E(n) = (1 + 2 max(n.z,0))/3, normalized so flat ground = 1
+                    float sky = (1.0 + 2.0*max(normal.z, 0.0)) / 3.0;
+                    // sun fixed in camera space (upper-left of screen), transformed to world; clamp its
+                    //  world elevation angle to [20,70] deg (preserving azimuth) so extreme tilts can't
+                    //  drive it below the horizon (relief inversion) or to the zenith (no modeling)
+                    vec3 s_cam = normalize(vec3(-0.5, 0.5, 0.707));
+                    vec3 s_world = s_cam * mat3(u_view);  // = transpose(view rotation) * s_cam
+                    float s_z = clamp(s_world.z, sin(radians(20.0)), sin(radians(70.0)));
+                    s_world = vec3(s_world.xy * (sqrt(1.0 - s_z*s_z) / max(length(s_world.xy), 1e-4)), s_z);
+                    // half-Lambert sun (wrap 0.4, exponent 1.5) so back slopes never clip to black
+                    float sun = pow(clamp((dot(normal, s_world) + 0.4) / 1.4, 0.0, 1.0), 1.5);
+                    // Normalize by the FIXED theoretical max of the numerator (sky<=1, occ<=1.15,
+                    //  sun<=1, all by their own clamps above), not by flat ground's own sun exposure
+                    //  as an earlier version did. A steep slope tilted TOWARD the (elevation-clamped)
+                    //  sun can face it far more directly than flat ground ever can (flat ground's
+                    //  n.s is capped at sin(sun elevation) <= sin(70deg), while a tilted facet's n.s
+                    //  can reach 1), so normalizing against flat ground let L3 - and after
+                    //  u_shade3d_gain, the final color - run past 1.0 and clip to solid white on
+                    //  steep, sun-facing terrain (reported as "white patches" on Dolomite/Alps spires
+                    //  - see docs/terrain-illumination-plan.md). Normalizing against the fixed max
+                    //  instead bounds L3 in [0,1] for every normal/rotation by construction, so
+                    //  color3d can never exceed 1.0 (pure white) regardless of slope or facing.
+                    float L3 = (u_sky_weight * sky * occ + u_sun_weight * sun)
+                             / max(u_sky_weight * 1.15 + u_sun_weight, 1e-3);
+                    L3 = mix(L3, 1.0, u_haze_contrast * haze);
+                    // composite as a translucent blend-over layer, same trick as the 2D 4*shading-3
+                    vec4 color3d = vec4(vec3(u_shade3d_gain*L3 - (u_shade3d_gain - 1.0)), u_shade3d_alpha);
+                    // contours/hypsometric tint stay tilt-independent
+                    color3d = mix(color3d, base_color, base_color.a);
+                    color = mix(color, color3d, tilt_morph);
                     #endif
                     // prevent duplicate call to calculateLighting()
                     #undef TANGRAM_LIGHTING_FRAGMENT
