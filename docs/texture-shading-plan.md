@@ -566,3 +566,52 @@ Follow-up work on this branch, building on the texture-shading integration:
 - **Default `u_texture_shading_alpha` is now 0.6** (was 2.0): broad-landform emphasis reads
   far better and no longer washes out land cover colors on steep terrain, and is viable now
   that the low-alpha (deep-band) seams above are fixed.
+
+### Open follow-ups (2026-07-06, evening)
+
+1. **Tiles with no texture shading at all (persistent, tile-shaped flat areas).**
+   Root cause: `RasterTileTask::addRaster()` skips `buildElevationMosaic()` for `isProxy()`
+   tasks (the phase-4 congestion mitigation), so those tiles keep the *plain* per-tile
+   texture. The plain texture has `filtering: nearest` and **no mip chain**, so
+   `textureLod()` returns the base level for every LOD -> all pyramid bands difference to
+   exactly zero -> `ts_shade = 0.5` -> texture shading completely absent for that tile
+   (and the ELEVATION_MOSAIC center-third UV remap mis-samples the plain texture, so the
+   Lambertian shading/contours there are subtly wrong too). This is fine for *transient*
+   proxies, but the state can persist: a prefetch-only neighbor tile that later scrolls
+   into view (or a proxy promoted to visible) is not rebuilt, so it renders with the plain
+   texture indefinitely. Fix options (pick one):
+   - Lazily upgrade at render: when a tile with `m_buildElevationMosaic` set is about to be
+     rendered with a non-mosaic elevation raster (width not 3*(W-overlap)), swap in
+     `buildElevationMosaic()` - cheap now that mosaics are shared via `m_mosaics`.
+   - Only skip the mosaic for `m_prefetchOnly` tasks, not all `isProxy()` ones, and rebuild
+     rasters when a prefetch-only tile becomes visible.
+   Either way, consider a shader-side guard (skip remap + texture shading when
+   `rasterPixelSize` isn't a mosaic) so a plain texture at least renders *correct*
+   Lambertian shading instead of a mis-sampled window.
+
+2. **Land cover still hidden in 3D for existing installs.** The stale
+   `terrain_3d: updates: global.show_land_polygons: false` persists in existing
+   `config.yaml` files, and the `loadConfig()` migration added on this branch only runs when
+   `prevVersion < versionCode` - but `versionCode` = MAPS_GIT_COUNT (git *tag* count), which
+   hasn't changed, so the migration never fires for a dev build. Fix: drop that specific
+   key *unconditionally* in `loadConfig()` (the app never writes it anymore, and the
+   "Polygons" GUI checkbox is the supported way to hide polygons), or just hand-delete the
+   two `updates:` lines from `~/.config/Ascend/config.yaml` while the app is closed.
+
+3. **Auto-contrast for texture shading (design, not yet implemented).** Goal: adapt
+   `u_texture_shading_contrast` to zoom + regional ruggedness without visible pops while
+   panning. Proposed approach:
+   - Per elevation tile, at load, compute a cheap dimensionless ruggedness statistic on the
+     CPU and cache it on the texture like `ElevTexInfo` (e.g. RMS elevation difference
+     between the tile at two mip-like scales, divided by tile ground size - the same
+     normalization the shader applies, so the statistic is zoom-invariant).
+   - Per frame, aggregate (area-weighted mean) that statistic over the visible tiles PLUS
+     one neighbor ring - i.e. a window ~3-4x the viewport area, which matches the "3-4x
+     viewport squared" intuition: side-scrolling only swaps a thin strip of the window, so
+     the aggregate moves smoothly. The neighbor-prefetch machinery already keeps that ring
+     warm.
+   - Set contrast = clamp(target_az / aggregate, min, max) (target_az ~ 0.8, the sweet spot
+     of Brown's sigmoid), then slew-limit / exponentially smooth the uniform over ~0.5-1 s
+     so remaining steps (tiles entering the window, zoom transitions) ease in instead of
+     jumping. Existing topography on screen never jumps because the uniform is global and
+     rate-limited; it only drifts as the surrounding-window statistics drift.
