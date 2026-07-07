@@ -615,3 +615,21 @@ Follow-up work on this branch, building on the texture-shading integration:
      so remaining steps (tiles entering the window, zoom transitions) ease in instead of
      jumping. Existing topography on screen never jumps because the uniform is global and
      rate-limited; it only drifts as the surrounding-window statistics drift.
+
+### Resolution of the open follow-ups (2026-07-06, late)
+
+All three items above are implemented on this branch:
+1. Proxy/prefetch tiles: `TileManager::upgradeElevationMosaic()` swaps the plain per-tile
+   texture for the shared mosaic whenever a tile is (re)used as visible - covering cache
+   retrieval (`addTile`), tasks completing right at promotion (stale `isProxy` flag now
+   cleared before `completeTileTask()`), and tiles completed earlier as proxy/prefetch.
+2. Stale `show_land_polygons` key: dropped unconditionally in `loadConfig()` (not gated on
+   the version bump, which never fires between dev builds).
+3. Auto-contrast: per-tile dimensionless RMS-slope statistic (`computeRugosity`, stride W/32,
+   normalized by true ground distance) cached in `ElevationMosaicInfo` alongside the
+   original-texture lifetime anchor; `RasterSource::aggregateRugosity()` averages it over all
+   live mosaics (visible + prefetch ring ~ 3-4x viewport; water/flat tiles < 0.005 skipped so
+   coasts aren't biased); `MapsApp::mapUpdate()` drives a new `u_texture_shading_auto`
+   uniform toward `clamp(0.35/rugosity, 0.3, 3.0)` with a ~0.7 s slew limit. Calibration:
+   BC Coast Mountains ~0.28 -> factor ~1.25; flat city ~0.04 -> clamped 3.0. The contrast GUI
+   slider multiplies on top as a manual trim.

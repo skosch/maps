@@ -870,6 +870,41 @@ void MapsApp::mapUpdate(double time)
     locMarkerNeedsUpdate = false;
   }
 
+  // Texture shading auto-contrast: drive u_texture_shading_auto from the regional ruggedness
+  //  statistic aggregated over all live elevation mosaics (roughly the visible tiles plus the
+  //  prefetched neighbor ring, i.e. a window a few times the viewport - so panning shifts the
+  //  target only gradually as tiles enter/leave the window), and slew-limit the uniform
+  //  (~0.7 s time constant) so any remaining steps ease in instead of popping. Flat regions
+  //  get their landform structure boosted, high mountains stop clipping, and the
+  //  "Texture Shading Contrast" GUI slider still multiplies on top as a manual trim.
+  if(textureShading) {
+    static double lastAutoContrastTime = 0;
+    auto elevSrc = std::static_pointer_cast<Tangram::RasterSource>(getElevationSource());
+    float rug = elevSrc ? elevSrc->aggregateRugosity() : -1.f;
+    if(rug > 1e-6f) {
+      // 0.35/rug ~= 1.0 for moderately rugged terrain (calibrated on BC Coast Mountains at
+      //  z11-13); clamped so plains don't dissolve into amplified noise and extreme relief
+      //  keeps some structure
+      float target = std::min(std::max(0.35f/rug, 0.3f), 3.0f);
+      float dt = lastAutoContrastTime > 0 ? float(time - lastAutoContrastTime) : 1e6f;
+      texShadingAutoContrast += (target - texShadingAutoContrast)*std::min(1.f, dt/0.7f);
+      for(auto& style : map->getScene()->styles()) {
+        if(style->getName() != "hillshade") { continue; }
+        for(auto& uniform : style->styleUniforms()) {
+          if(uniform.first.name == "u_texture_shading_auto" && uniform.second.is<float>()) {
+            if(std::abs(uniform.second.get<float>() - texShadingAutoContrast) > 0.002f) {
+              uniform.second.set<float>(texShadingAutoContrast);
+              platform->requestRender();
+            }
+            break;
+          }
+        }
+        break;
+      }
+    }
+    lastAutoContrastTime = time;
+  }
+
   mapState = map->update(time - lastFrameTime);
   lastFrameTime = time;
   //LOG("MapState: %X", mapState.flags);
@@ -2319,11 +2354,15 @@ bool MapsApp::loadConfig(const char* assetPath)
       Tangram::YamlUtil::mergeMapFields(newconfig, std::move(config));
       config = std::move(newconfig);
     }
-    // land cover polygons now drape over 3D terrain (see hillshade.yaml), so drop the obsolete
-    //  default update (carried over from older versions' config.default.yaml) that hid them in 3D
-    if(config["terrain_3d"]["updates"].has("global.show_land_polygons"))
-      config["terrain_3d"]["updates"].remove("global.show_land_polygons");
   }
+
+  // land cover polygons now drape over 3D terrain (see hillshade.yaml), so drop the obsolete
+  //  default update (carried over from older versions' config.default.yaml) that hid them in 3D;
+  //  unconditional (not gated on a version bump) because versionCode is the git *tag* count and
+  //  does not change between dev builds - the app never writes this key anymore, and hiding
+  //  polygons is handled by the "Polygons" GUI checkbox instead
+  if(config["terrain_3d"]["updates"].has("global.show_land_polygons"))
+    config["terrain_3d"]["updates"].remove("global.show_land_polygons");
 
   return prevVersion < versionCode;
 }

@@ -175,6 +175,10 @@ styles:
                 # contrast multiplies a dimensionless slope-like value (see textureShading()), so
                 #  its useful range is O(1) at any zoom level
                 u_texture_shading_contrast: 1.0
+                # auto-contrast factor, set per-frame by the app (MapsApp::mapUpdate) from the
+                #  regional ruggedness statistic (RasterSource::aggregateRugosity) with slew
+                #  limiting - NOT a gui variable; the contrast slider above multiplies on top
+                u_texture_shading_auto: 1.0
                 u_texture_shading_opacity: 0.7
                 u_texture_shading_levels: 6
                 u_texture_shading_scale: 1.25
@@ -262,7 +266,7 @@ styles:
                         //  a dimensionless, slope-like quantity, so u_texture_shading_contrast behaves
                         //  comparably at any zoom instead of multiplying raw meters (whose magnitude per
                         //  band scales with the ground size of a texel)
-                        float az = u_texture_shading_contrast * z / (texelMeters * exp2(b));
+                        float az = u_texture_shading_contrast * u_texture_shading_auto * z / (texelMeters * exp2(b));
                         return az / (2.0*sqrt(1.0 + az*az)) + 0.5;
                     }
                     #endif

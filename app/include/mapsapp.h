@@ -228,6 +228,9 @@ public:
   static bool metricUnits;
   static bool terrain3D;
   static bool textureShading;
+  // slew-limited auto-contrast factor for texture shading (see mapUpdate); persists across
+  //  scene reloads (the uniform itself resets to 1.0 with the scene)
+  float texShadingAutoContrast = 1.0f;
   static std::vector<Color> markerColors;
   static ThreadSafeQueue< std::function<void()> > taskQueue;
   static std::thread::id mainThreadId;
