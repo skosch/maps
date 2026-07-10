@@ -399,3 +399,151 @@ of the numerator (`sky<=1, occ<=1.15, sun<=1`) instead, which bounds `L3` (and t
 correct than the old formula even though it wasn't the culprit for this bug. Verified via
 direct A/B screenshot at the same location (identical output before/after — confirming this
 term was not the source of the visible artifact, while still being a real hardening).
+
+## Third, distinct "white patches" phenomenon — raster-zoom mismatch, opportunistically fixed (2026-07-07)
+
+A third, separate contributor to the "white patches" family, this one a genuine **data
+resolution** bug rather than a shading/tessellation artifact, traced during the same alpine
+investigation as the two phenomena above.
+
+**Root cause.** In 3D terrain mode, `terrain-ground` (`assets/scenes/hillshade.yaml`) and
+draped vector styles (`unlit-polygons` etc., `assets/scenes/stylus-osm.yaml`) both displace
+their mesh vertices by an elevation sample (`position` block, `assets/scenes/terrain-3d.yaml`;
+`getElevation()`, `assets/scenes/elevation.yaml`), but from *different-resolution* rasters at
+the same physical location:
+
+- `terrain-ground` uses the elevation raster as its own primary data source
+  (`data: {source: elevation}`), so it always fetches native-resolution tiles up to the
+  elevation source's own `max_zoom: 16`.
+- Draped vector styles get elevation via a secondary raster attachment
+  (`rasters: global.elevation_sources` on the `osm` vector source, whose own `max_zoom` caps
+  at 14). `TileID` (`tangram-es/core/include/tangram/tile/tileID.h`) carries both `z` (the
+  zoom the tile's data was actually fetched at) and `s` (the display/"styling" zoom); these
+  diverge when a tile is overzoomed past its source's own cap (`s > z`). `RasterSource::
+  addRasterTask` (`tangram-es/core/src/data/rasterSource.cpp`, ~line 364) attaches the
+  elevation raster at the *primary* task's own `TileID` — for an overzoomed `osm` tile that's
+  `(x, y, z=14, s=16)` — and only clamps `z` **downward** via `withMaxSourceZoom` if it
+  exceeds the elevation source's own `maxZoom`. Since `14 <= 16` that's a no-op: the attached
+  elevation ends up fetched at `z=14`, never at elevation's own native `z=16`, nor at the true
+  display zoom `s`. Draped polygons therefore sample a genuinely coarser (not just
+  lower-tessellated) DEM than the co-located `terrain-ground` mesh, worst wherever local relief
+  is highest — a real vertical (Z) discrepancy between two nominally-coincident surfaces, which
+  grazing-angle parallax amplifies into a large apparent lateral gap (basic geometry: a small
+  vertical error, viewed near-tangent to a slope, projects to a large screen-space
+  displacement). This is distinct from (and additional to, not a replacement for) the
+  grid-tessellation/curvature fix already landed this session (`buildPolygonGrid`,
+  `tangram-es/core/src/util/builders.cpp`) — that fixes a *tessellation-resolution* mismatch
+  between the piecewise-linear drape and the terrain mesh's curvature; this fixes a *raster
+  data* mismatch between what elevation values the two meshes read in the first place. A
+  headless grazing-angle screenshot test confirmed the tessellation fix alone left this
+  phenomenon unchanged.
+
+**Fix — opportunistic, cache-only elevation mosaic** (`tangram-es/core/src/data/rasterSource.{h,cpp}`).
+Deliberately scoped down from a full fix (which would need new active-fetch coordination for
+the finer child tiles): when the elevation attachment's own `TileID` is overzoomed relative to
+both the elevation source's own `maxZoom` and the primary tile's display zoom (`s > z` and
+`z < min(elevationMaxZoom, s)`), `RasterSource::buildOverzoomElevationMosaic` computes a target
+zoom `zt = min(elevationMaxZoom, s)`, capped to at most `kMaxOverzoomLevels = 2` levels above
+`z` to bound cost (elevation caps at z16, `osm` at z14 — a 2-level, 4×4 = 16-tile gap in the
+common case). It enumerates the `N × N` (`N = 2^levels`) descendant `TileID`s covering the
+primary tile's footprint at `zt` and looks each up in the elevation `RasterSource`'s *existing*
+weak-ref texture cache (`m_textures`, the same cache `buildElevationMosaic`'s neighbor-mosaic
+already reads) — **no new network fetch** is triggered. If at least one descendant is already
+resident, `stitchElevationOverzoomMosaic` (free function, unit-testable in isolation) CPU-stitches
+a composite covering the *same* `[0,1]` UV footprint as the primary's own coarse texture — a
+direct higher-resolution replacement, not a padded neighbor-ring mosaic like the texture-shading
+one. Real cells are copied verbatim (cropped to `Wp = W - overlap` per the existing
+node-registration convention); any missing cell is filled by nearest-neighbor upsampling the
+corresponding sub-rectangle of the primary's own coarse texture — i.e. exactly what that region
+already shows today, so a partial composite is provably never worse than the pre-fix behavior,
+only sometimes better (this is why the "enough cells present" bar was set at "at least one",
+not a majority — see the code comment on `buildOverzoomElevationMosaic` for the empirical
+reasoning: under a grazing/tilted camera a single coarse `osm` tile's footprint spans a wide
+range of on-screen distances, and only the near part actually gets native-zoom elevation
+cached in practice, so requiring a majority would mean the fix almost never engages for exactly
+the highest-relief, most parallax-amplified part of the tile that matters most). The composite
+is registered at the *primary* task's own coarse `TileID` (not `zt`), so
+`Style::setupTileShaderUniforms`'s `tileID.z > raster.tileID.z` crop logic (`style.cpp`, ~line
+250) needs zero changes — it already treats same-`z` rasters as "one texture, no crop," which is
+exactly correct here since the composite spans the identical UV footprint, just at higher
+internal resolution.
+
+**A real bug found and fixed during verification.** The first working version of this
+composite unconditionally took priority over the existing texture-shading neighbor-ring
+mosaic (`buildElevationMosaic`, gated on `m_buildElevationMosaic` / the "Texture shading"
+scene toggle). This broke rendering badly whenever texture shading was on (the default in this
+testenv's `config.base.yaml`): `ELEVATION_MOSAIC` is a scene-wide shader compile flag, and once
+on, *every* texture bound to the elevation raster slot is read through `elevationMosaicUV()`
+(`elevation.yaml`), which unconditionally remaps tile-local UV into the center **ninth** of
+whatever texture is bound, assuming the Frozen-Interface-Contract 3×3-neighbor-ring layout. Fed
+this composite instead (a same-footprint, non-neighbor-ring texture), the shader read an
+effectively arbitrary sub-region for the elevation displacement of every draped vertex — observed
+as **land-cover polygon fills vanishing entirely** (screenshot: `testenv-bug2/shots/
+after-fix-closeup.png` vs. the correct `before-fix-closeup.png`), while contour lines and roads
+(read via a different code path) remained visible, and instrumented logging confirmed the
+composite's own elevation *values* were fine (plausible Dolomites heights, ~1300–3000 m) —
+the bug was purely in which texture got bound where, not in the data itself. Fix: the overzoom
+composite now only engages when `!source->m_buildElevationMosaic`; when texture shading is on,
+this pass's fix is a no-op and the existing (already-shipped, already covers same-zoom
+neighbor blending) texture-shading path is unchanged. Composing the two mechanisms is deferred
+to the future upgrade path below. This is exactly why the testing standard's before/after A/B
+matters even for a change that looks obviously-correct in isolation — do not skip it.
+
+**Known limitation — cache-only, no active fetch.** This is deliberately opportunistic: it
+never triggers a new elevation fetch, so it only helps when the finer descendant tiles happen
+to already be cached (typically because `terrain-ground` needed them for onscreen rendering,
+which is nearly always true when this drape system matters at all in the common case of 3D
+terrain + texture shading *off*). A polygon tile built before its matching finer tiles are
+cached shows the coarser fallback until it happens to get rebuilt.
+
+**Future upgrade path (not implemented).** A fuller fix would have `RasterSource::
+addRasterTask` actively create the `N` child raster subtasks (reusing the existing
+`createRasterTask`/subtask machinery, which already drives arbitrary numbers of subtasks to
+completion) to *guarantee* the finer tiles get fetched, then run the same stitching once
+they're ready — and, further out, extend the composite to also satisfy the
+`ELEVATION_MOSAIC`/`elevationMosaicUV()` contract (e.g. by feeding it as the "own" cell of a
+neighbor-ring mosaic, once same-size same-layout output is worked out) so the two mechanisms
+can compose instead of being mutually exclusive. `stitchElevationOverzoomMosaic` was
+deliberately written to take "whatever textures are available" (nulls allowed) as input,
+independent of *how* they got cached, so it can be reused unchanged for the active-fetch
+version.
+
+**Verification.**
+- Unit tests: `tests/unit/rasterMosaicTests.cpp` gained 6 new `TEST_CASE`s for
+  `stitchElevationOverzoomMosaic` (grid-cell placement, nearest-neighbor fallback for missing
+  cells including a mixed-availability case, dimension-mismatch rejection, node-registered
+  `Wp` cropping, and invalid-input handling). Full suite: 1721 assertions / 164 test cases, up
+  from the pre-existing baseline of 1592/158, all passing.
+- The exact reproduction camera specified for this task (`--view.lng 12.3053 --view.lat 46.61
+  --view.zoom 15.0 --view.tilt 1.3 --terrain_3d.enabled true`, Tre Cime cliffs) turned out, on
+  instrumented inspection, to have **no actual overzoom** for the `osm`→elevation attachment at
+  that exact zoom (`s == z` for every attached tile in the visible set) — the overzoom
+  compensation the `TileManager` itself applies only kicks in once a coarse tile's on-screen
+  area is still too large *even at its own max zoom*, which this particular framing doesn't
+  trigger. Before/after screenshots there are pixel-identical (`before-fix-dolomites.png` /
+  `final-after-dolomites.png`, safe no-op, confirmed via debug instrumentation of
+  `buildOverzoomElevationMosaic`'s inputs — zero regression, exactly the intended "not
+  overzoomed, don't touch anything" behavior).
+- A nearby, still-representative grazing view **does** trigger genuine overzoom with a
+  non-degenerate render (`--view.zoom 16.5 --view.tilt 0.9`, same location; deeper zooms at
+  this same lng/lat clip the camera eye into the terrain itself — an unrelated, pre-existing
+  camera-placement quirk for this very-high-relief target, not something this fix touches).
+  With texture shading off (`--texture_shading.enabled false`, isolating this fix's own
+  effect from the unrelated texture-shading feature) the composite fires for 6 of the tile's
+  raster attachments, each built from a partial (2–6 of 16, or 2 of 4) cache hit. Before/after
+  diff (`before-fix-notexshading.png` / `after-fix-notexshading.png`): small and localized —
+  road and contour lines shift by a few pixels (they read the same elevation attachment and
+  now sample the corrected, finer data) and a scattering of small landuse-polygon edges move
+  slightly as the underlying terrain curvature they're draped against changes; ~5.4% of pixels
+  differ, mean per-channel diff 4/255. This is an honest, modest, localized correction — not a
+  dramatic transformation — consistent with the deliberately opportunistic scope (only a
+  handful of the 16 finer tiles were cached in this run; a longer-loaded or more
+  texture-shading-adjacent-in-time session would very likely see more cells hit and a larger
+  correction). It does not, on its own, fully resolve the broader "white patches" family at the
+  literal task camera, since that camera doesn't exercise this bug in the first place — see the
+  two other phenomena documented above for what's actually visible there.
+- Regression checks, both with the fix active: a zoomed-out 3D view of the wider Dolomites
+  region (`--view.zoom 11 --view.tilt 0.5`, `final-regression-3d-zoomedout.png`) and a plain 2D
+  view of the Tre Cime peaks (`--view.zoom 15 --terrain_3d.enabled false`,
+  `final-regression-2d.png`) both render normally — hillshade, contours, labels, and roads all
+  present and undistorted, no artifacts introduced by this change.

@@ -391,14 +391,25 @@ styles:
         mix: global.terrain_3d_mixin
         lighting: false
 
-    # with 3D terrain, terrain_grid tessellates polygons on the terrain mesh grid (64, see
-    #  rasterStyle.cpp/builders.cpp) so per-vertex elevation drapes them accurately over the terrain -
-    #  critical for land cover / landuse polygons spanning significant relief; no effect in 2D
+    # with 3D terrain, terrain_grid tessellates polygons on a grid (see rasterStyle.cpp/builders.cpp)
+    #  so per-vertex elevation drapes them accurately over the terrain - critical for land cover /
+    #  landuse polygons spanning significant relief; no effect in 2D.
+    # The vertices themselves are placed on the terrain mesh's own piecewise-linear surface by
+    #  getTerrainMeshElevation (elevation.yaml) - the actual fix for the "white patches" on steep
+    #  alpine terrain (see its comment). The grid resolution's job is only to ensure no polygon
+    #  triangle spans more than one terrain-lattice cell (a triangle crossing lattice cells would
+    #  chord across the surface's folds). This "osm" source caps at max_zoom 14 (the tile server has
+    #  no data beyond that - confirmed directly) while the elevation source (elevation.yaml) goes to
+    #  16, so tiles are overzoomed up to 2 levels and the lattice is up to 64 * 2^2 = 256 cells per
+    #  tile; 256 matches that worst case (power-of-two multiples of the lattice nest exactly, so it's
+    #  also correct at lower view zooms). buildPolygonGrid (builders.cpp) flushes oversized features
+    #  into multiple indexed sub-ranges instead of falling back to a coarse undraped triangle, so
+    #  this costs CPU/vertices at tile load (3D only) but never degrades drape quality.
     unlit-polygons:
         base: polygons
         mix: global.terrain_3d_mixin
         lighting: false
-        terrain_grid: true
+        terrain_grid: 256
 
     ocean-polygons:
         base: polygons

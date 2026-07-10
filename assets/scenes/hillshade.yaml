@@ -478,7 +478,16 @@ styles:
                     // contours/hypsometric tint (in base_color) composite over the shading and are
                     //  tilt-independent; in 3D this whole 2D-look layer is morphed toward the oblique
                     //  illumination below with tilt_morph
-                    color = vec4(4.0*shading.rgb - 3.0, 0.25);
+                    // combined ambient+diffuse from light1+light2 (below) can reach ~1.05, not just
+                    //  1.0, on facets tilted toward both directions at once (common on near-vertical,
+                    //  DEM-noise-amplified cliffs at u_exaggerate=4.5); soft-clip the excess above the
+                    //  nominal max instead of letting it hard-clip to solid white, which otherwise
+                    //  flattens whole patches of steep terrain into a featureless white blotch
+                    //  ("white patches" on Dolomite/Alps spires - docs/terrain-illumination-plan.md)
+                    vec3 sh = shading.rgb;
+                    vec3 over = max(sh - 0.95, 0.0);
+                    sh -= over - over/(1.0 + 3.0*over);
+                    color = vec4(4.0*sh - 3.0, 0.25);
                     color = mix(color, base_color, base_color.a);
                     #else
                     color = calculateLighting(v_position.xyz, normal, base_color);
