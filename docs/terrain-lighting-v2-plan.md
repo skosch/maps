@@ -297,8 +297,11 @@ float terrainLuma(vec3 n, vec3 s_world, float occ, float sunvis, float T) {
   float m = mix(0.95 + 1.0/3.0, u_shoulder_max, T);     // u_shoulder_max default 1.0
   float o = max(L - 0.95, 0.0);
   L  = L - o + (m - 0.95) * o / (o + (m - 0.95));       // == old softclip at T=0
-  // haze contrast attenuation unchanged in spirit: L = mix(L, 1.0, u_haze_contrast*haze)
-  //  (haze = 0.0 outside TANGRAM_TERRAIN_3D)
+  // haze contrast attenuation MUST be tilt-gated: L = mix(L, 1.0, u_haze_contrast*haze*T)
+  //  (haze = 0.0 outside TANGRAM_TERRAIN_3D). haze is NOT ~0 at zenith with terrain on
+  //  (fragments sit ~eyeh away -> haze ~0.4); the old code only got away with applying it
+  //  ungated because it lived inside the tilt-mixed 3D layer. occ's own haze attenuation
+  //  needs no extra gate - occ's effect is already T-gated via mix(1.0, occ, T).
   ```
   Why `u_shoulder_max = 1.0` at T=1: post-gain white is `gain·L-(gain-1) = 1` exactly at
   `L = 1`, so with the shoulder asymptoting to 1.0, pure white is approached but never
@@ -368,6 +371,97 @@ float terrainLuma(vec3 n, vec3 s_world, float occ, float sunvis, float T) {
   all channels within a cliff crop — the shoulder must hold what the old fixed-max
   normalization was protecting).
 - Full rotation matrix re-run: no inversion, no discontinuity (old Phase C method).
+
+### Phase 2 — Revision after first user test (2026-07-10)
+
+First build of Phase 2 still "flattened everything at tilt" (user report). Diagnosis
+found THREE mechanisms, the first of which was also the true cause of the original
+pre-v2 flatness — the sky-vs-sun weight question (F5.1) was largely a red herring:
+
+1. **The `gain·L − (gain−1)` compositing is a WINDOW, and it was crushing everything.**
+   Gain g maps only `L ∈ [1 − 1/g, 1]` onto visible grays; all L below the floor clamps
+   to identical black (then composites as a uniform darkening at the layer's alpha =
+   uniform gray mountains). Gain 4.5 → floor 0.78. The 2D formula co-evolved with its
+   0.7 ambient floor (L ∈ [0.7, 1.1] by construction — inside the window); any honest
+   3D model produces L ≈ 0.3–0.6 over most sloped terrain — ALL of it crushed to the
+   floor, in the old sky-dominant model and the new sun-dominant one alike. **Fix:**
+   `u_shade3d_gain` default 4.5 → **1.4** (window floor ≈ 0.29 ≈ w_amb/norm, so the
+   whole L range grades instead of clipping), `u_shade3d_alpha` 0.35 → **0.55** (the
+   wider window carries less punch per unit alpha). Worked example at T=1, 30°-true
+   slopes at 2× lighting exaggeration: sun-facing L≈1.09→rgb 0.98 vs. sun-averted
+   L≈0.55→rgb 0.37 — Δ≈0.6 in the overlay, ≈0.34 on the map at α 0.55; flat ground
+   rgb≈0.97 (nearly untouched, as designed).
+2. **Tilting RAISED the sun.** The screen-anchored `s_cam=(-1,1,1)` sits at 35.26°
+   world elevation at zenith but ~50–55° by 45–60° tilt — inside the [20°,70°] clamp,
+   so the clamp never engaged; raking light silently became near-overhead light.
+   **Fix:** hard-SET the world elevation to `u_sun_elev` (default 35.264° =
+   asin(1/√3), exact zenith no-op → parity preserved), keeping only the azimuth
+   screen-anchored. Replaces the clamp entirely (normal block).
+3. **Normals were lit at 4.5× exaggeration on 1×-displayed geometry.** At 4.5×, every
+   real mountain slope's normal is near-horizontal (n.z ≈ 0.1–0.4): the sky term
+   saturates to a constant across all steep terrain. **Fix:** `hscale =
+   mix(u_exaggerate, u_exaggerate_3d, tilt_morph)`, new `u_exaggerate_3d` default 2.0
+   (slider). Required moving the `tilt_morph` definition ahead of the normal
+   computation; its guard is now `defined(TANGRAM_TERRAIN_3D) && !ELEVATION_INDEX`
+   (equivalent to the HILLSHADE_BLEND_OVER check, which isn't #defined yet at that
+   point in the normal block).
+
+Implication for Phase 4 (cast shadows): with gain ~1.4 the overlay is nearly a direct
+luminance layer, so shadow terms will read almost literally — good; no window math to
+fight. Implication for tuning: `u_lum_cap` is now mostly moot (the shoulder does the
+work); leave it.
+
+### Third revision: yaw-only sun anchoring (2026-07-11)
+
+Diagnosis of the second revision's own fix (elevation hard-set, item 2 above): hard-
+setting elevation but still rotating the sun by the **full** camera rotation
+(`s_world = s_cam * mat3(u_view)`) let camera **pitch** leak into the sun's world
+**azimuth** — facing north, azimuth drifted NW (zenith) → due W (45° tilt) → WSW (60°
+tilt), ~65° of drift across the tilt range, continuously relighting the terrain while
+tilting (reported as a "weirdly lustrous texture"). Root cause: `mat3(u_view)` is a
+full 3D rotation, so pitch rotates the sun vector just as much as yaw does; only yaw
+should move a screen-anchored sun.
+
+**Fix**: anchor the sun's azimuth to the map's **yaw only** — never pitch. Camera-right
+in world space is row 0 of `u_view` (world→camera; rows are the camera basis vectors in
+world space); under pure yaw+pitch (the map never rolls) camera-right stays horizontal,
+so its xy component *is* the yaw, uncontaminated by pitch. Project that onto the map
+plane to get screen-right (`e`) and screen-up (`h` = `e` rotated 90° CCW), then place the
+sun at `u_sun_azimuth` degrees CCW from `e` at fixed elevation `u_sun_elev`. New uniform
+`u_sun_azimuth` (default 135°, GUI slider 90–180 step 5) replaces the fixed
+`normalize(-1,1,1)` camera-space vector.
+
+**Deliberate tradeoff** (Sebastian's choice): tilting the camera now never moves the sun
+at all — shading polarity at every tilt is identical to the 2D zenith polarity. Facing
+north, this means the predominantly-visible lit sides stay the same (south-facing slopes
+shaded) as tilt increases, rather than the sun's world position "correctly" changing with
+viewing angle. This is accepted in exchange for eliminating the tilt-relighting artifact;
+2D↔3D continuity wins over strict world-space realism.
+
+**Zenith parity is exact by construction**: at north-up zenith, `cam_right` = world east
+= `(1,0,0)`, so `e=(1,0)`, `h=(0,1)`. With `u_sun_azimuth=135°`, `az_dir = (cos135°,
+sin135°) = (-0.70711, 0.70711)`. With `u_sun_elev=35.264°` (`asin(1/√3)`),
+`cos(35.264°)=√(2/3)=0.81650`, `sin(35.264°)=√(1/3)=0.57735`. `s_world = (az_dir *
+0.81650, 0.57735) = (-0.57735, 0.57735, 0.57735) = normalize(-1,1,1)` exactly — bit-
+identical to every prior revision's T=0 output.
+
+### Second revision: texture shading invisible at tilt (2026-07-10)
+
+Second user-test finding: texture shading itself, not just the base hillshade, goes
+dark at tilt. Diagnosis: the 2D whole-color ts multiply/tint (`ts_op = u_texture_
+shading_opacity * (1.0 - tilt_morph)`) deliberately fades to zero as tilt increases,
+by design (F5/Phase 2 pitfalls) — leaving texture shading to reach the tilted view only
+through `occ`, which multiplies just the sky slice of the light (`w_sky·sky ≈ 0.30·sky`),
+is ceiling-clamped at a hardcoded 1.15, and is haze-attenuated twice. Net ridge/valley
+luminance swing ≈0.08 at full tilt vs. ≈0.4–0.5 in 2D — roughly 5–6× too weak to see.
+**Fix**, three new sliders, all tilt_morph-gated (exactly inert at T=0): (1)
+`u_texture_shading_opacity_3d` (default 0.5) — a tilt-side whole-color ts opacity that
+ramps IN as the 2D one ramps out, with its own haze falloff; (2) `u_occ_ambient`
+(default 0.5) — lets occ also darken the ambient term (ambient is sky light too),
+raising occ's modulated share of the light from ~0.30·sky toward ~0.55+; (3)
+`u_occ_max` (default 1.25) — replaces the hardcoded 1.15 ceiling, which was silently
+halving the ridge-brightening half of the signal (unclamped ridge value reaches ~1.32
+at strength 0.8).
 
 ### Phase 3 — Chromatic shading (warm light / cool shadow)
 
