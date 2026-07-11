@@ -401,6 +401,27 @@ styles:
                     float slope_degs = atan(slope/coslat)*180.0/3.141592;
                     // setup base color - this could be moved to setup block
                     vec4 contour_color = u_contour_color;
+                    // Screen-anchored 2D sun (docs/terrain-lighting-v2-plan.md, Phase 1). This is the
+                    //  exact algebraic expansion of the old calculateLighting(v_position.xyz, normal,
+                    //  vec4(1.0)) against light1 (zenith, direction (0,0,-1), 0.2 diffuse/0.35 ambient)
+                    //  plus light2 (0.2/0.35) from the lights: section below - white material, no
+                    //  specular - but with light2's direction now defined in CAMERA space and rotated to
+                    //  world (s2_world = s2_cam * mat3(u_view), same camera->world pattern as s_cam/s_world
+                    //  in the 3D block below) instead of being the raw yaml vector dotted directly against
+                    //  this world-space normal. That mixup was the bug: with the default `origin: camera`,
+                    //  tangram leaves the yaml direction untransformed, so light2 - meant to read as
+                    //  "upper-left of the screen" - was actually interpreted in world space, i.e. fixed NW
+                    //  in the world and rotating with the terrain instead of staying screen-anchored.
+                    //  s2_cam = normalize(-1,1,1) is upper-left of the SCREEN at 35.26 deg elevation -
+                    //  pixel-identical to the old light2 at north-up rotation (camera axes coincide with
+                    //  world axes there), and correctly screen-fixed under any other rotation. Computed
+                    //  here, before the ELEVATION_INDEX split, so raw2d is in scope for both the
+                    //  blend-over branch immediately below and the raster-basemap branch in the color
+                    //  block (normal block runs before color block in the same fragment shader).
+                    vec3 s2_cam = normalize(vec3(-1.0, 1.0, 1.0));
+                    vec3 s2_world = s2_cam * mat3(u_view);
+                    float raw2d = 0.7 + 0.2*clamp(normal.z, 0.0, 1.0)
+                                      + 0.2*clamp(dot(normal, s2_world), 0.0, 1.0);
                     #if ELEVATION_INDEX
                     vec4 base_color = sampleRaster(0);
                     #else
@@ -409,7 +430,7 @@ styles:
                     //  polygons is provided by the terrain-ground style / layers.earth draw rule, so
                     //  land cover coloring stays visible in both modes).
                     #define HILLSHADE_BLEND_OVER
-                    vec4 shading = calculateLighting(v_position.xyz, normal, vec4(1.0));
+                    vec4 shading = vec4(vec3(clamp(raw2d, 0.0, 1.0)), 1.0);
                     vec4 base_color = vec4(0.0, 0.0, 0.0, 0.0);  //v_color;
                     contour_color = shading*contour_color;
                     #endif
@@ -490,8 +511,12 @@ styles:
                     color = vec4(4.0*sh - 3.0, 0.25);
                     color = mix(color, base_color, base_color.a);
                     #else
-                    color = calculateLighting(v_position.xyz, normal, base_color);
-                    color = vec4(color.rgb, 1.0);
+                    // Hillshade over a raster base map (e.g. satellite imagery): same explicit
+                    //  screen-anchored 2D formula as the blend-over branch above, applied to a white
+                    //  material - i.e. shading * base_color, exactly what
+                    //  calculateLighting(v_position.xyz, normal, base_color) reduced to before. raw2d
+                    //  was computed once in the normal block (in scope here - see comment there).
+                    color = vec4(clamp(raw2d, 0.0, 1.0) * base_color.rgb, 1.0);
                     #endif
                     #ifdef ELEVATION_MOSAIC
                     // texture shading (docs/texture-shading-plan.md) applied to the FINAL color, after
