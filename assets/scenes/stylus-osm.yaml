@@ -333,6 +333,10 @@ sources:
             © OpenStreetMap contributors
         max_zoom: 14
         rasters: global.elevation_sources
+        # How eagerly landcover/geometry drops to a coarser cached zoom while zooming out (see
+        #  TileSource::lodAreaBias's doc comment) - 1.0 is the previous default behavior;
+        #  live-adjustable via the resolution-retention GUI slider (MapsApp).
+        zoom_retention: 1.0
 
 
 fonts:

@@ -9,16 +9,24 @@ else()
   set(STYLUSLABS_DEPS "deps")
 endif()
 
+# LOG_LEVEL defaults to the build type's usual level but can be set independently, e.g.
+# `cmake -DCMAKE_BUILD_TYPE=Debug -DLOG_LEVEL=2 ..` for a debuggable build without the
+# LOGD spam in hot paths (tile fetch/build/mosaic-stitch) that makes panning feel slow.
 if(CMAKE_BUILD_TYPE MATCHES Debug)
   add_definitions(-DDEBUG)
-  add_definitions(-DLOG_LEVEL=3)
+  if(NOT DEFINED LOG_LEVEL)
+    set(LOG_LEVEL 3)
+  endif()
 else()
   add_definitions(-DNDEBUG)
-  add_definitions(-DLOG_LEVEL=2)
+  if(NOT DEFINED LOG_LEVEL)
+    set(LOG_LEVEL 2)
+  endif()
   #add_definitions(-DGLM_FORCE_INTRINSICS)
   # print glm config to ensure SIMD is being used
   #add_definitions(-DGLM_FORCE_MESSAGES)
 endif()
+add_definitions(-DLOG_LEVEL=${LOG_LEVEL})
 
 option(MAPS_USE_ASAN "Enable Address Sanitizer." OFF)
 if (MAPS_USE_ASAN)

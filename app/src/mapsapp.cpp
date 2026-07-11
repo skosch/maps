@@ -6,6 +6,8 @@
 #include <sys/stat.h>
 #include <fstream>
 #include <chrono>
+#include <thread>
+#include <algorithm>
 // for elevation
 #include "util/elevationManager.h"
 #include "data/rasterSource.h"
@@ -803,8 +805,11 @@ void MapsApp::loadSceneFile(bool async, bool setPosition)
   FSPath basePath(baseDir);
   for(const auto& font : cfg()["fallback_fonts"])
     options.fallbackFonts.push_back(Tangram::FontSourceHandle(Url(basePath.child(font.Scalar()).path)));
-  // single worker much easier to debug (alternative is gdb scheduler-locking option)
-  options.numTileWorkers = cfg()["tangram"]["num_tile_workers"].as<int>(2);
+  // single worker much easier to debug (alternative is gdb scheduler-locking option); default
+  // scales with core count on desktop since vector builds + raster decodes both serialize onto
+  // these workers (tile-pipeline-perf-plan.md R3) - config override always wins.
+  int defaultTileWorkers = std::min(6, std::max(2, int(std::thread::hardware_concurrency()) - 2));
+  options.numTileWorkers = cfg()["tangram"]["num_tile_workers"].as<int>(defaultTileWorkers);
   dumpJSStats(NULL);  // reset stats
   persistBounds = false;  // reset persistent bounds state
   map->loadScene(std::move(options), async);
@@ -855,6 +860,14 @@ void MapsApp::mapUpdate(double time)
     std::replace(credits.begin(), credits.end(), '\n', ' ');
     attribText->setText(credits.c_str());
     attribText->setVisible(true);
+    // Restore persisted resolution-retention bias (see TileSource::lodAreaBias, MapsSources::
+    // populateSceneVars) here too, not just when the settings panel happens to be opened -
+    // otherwise a value the user dialed in during a previous session would silently reset to
+    // the scene's default until they reopened that panel.
+    for(auto& src : map->getScene()->tileSources()) {
+      auto& biasCfg = config["resolution_bias"][src->name()];
+      if(biasCfg) { src->setLodAreaBias(biasCfg.as<float>(src->lodAreaBias())); }
+    }
     sendMapEvent(SCENE_LOADED);
   }
   else

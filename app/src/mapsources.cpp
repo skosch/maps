@@ -3,6 +3,7 @@
 #include "util.h"
 #include "scene/scene.h"
 #include "style/style.h"  // for making uniforms avail as GUI variables
+#include "data/tileSource.h"  // for the resolution-retention sliders (TileSource::lodAreaBias)
 #include "data/mbtilesDataSource.h"
 #include "data/networkDataSource.h"
 #include "util/yamlUtil.h"
@@ -740,6 +741,32 @@ void MapsSources::populateSceneVars()
       }
     }
   }
+  // Resolution-retention sliders (tile-pipeline-perf-plan.md "keep max resolution on zoom-out"):
+  // TileSource::lodAreaBias is live C++ state (TileManager reads it every frame), not a shader
+  // uniform or a global scene var baked in at load time, so it can't go through the
+  // gui_variables dispatch above - direct-poke pattern instead (find the live TileSource, set
+  // the value, requestRender()), same as u_texture_shading_auto in MapsApp::mapUpdate. Exposed
+  // per source (landcover vs. hillshading/texture-shading) so the resolution/perf tradeoff is
+  // the user's own call.
+  auto addResolutionBiasSlider = [&](const char* label, const char* srcname, const char* cfgkey){
+    std::shared_ptr<Tangram::TileSource> src;
+    for(auto& s : app->map->getScene()->tileSources()) {
+      if(s->name() == srcname) { src = s; break; }
+    }
+    if(!src) { return; }
+    float initial = app->config["resolution_bias"][cfgkey].as<float>(src->lodAreaBias());
+    src->setLodAreaBias(initial);
+    auto spinBox = createTextSpinBox(initial, 0.1, 1.0, 4.0, "%.1f");
+    spinBox->onValueChanged = [=](real val){
+      src->setLodAreaBias(float(val));
+      app->config["resolution_bias"][cfgkey] = float(val);
+      app->platform->requestRender();
+    };
+    varsContent->addWidget(createTitledRow(label, spinBox));
+  };
+  addResolutionBiasSlider("Landcover Resolution", "osm", "osm");
+  addResolutionBiasSlider("Hillshade Resolution", "elevation", "elevation");
+
   varsSeparator->setVisible(!varsContent->containerNode()->children().empty());
 
   std::string credits;

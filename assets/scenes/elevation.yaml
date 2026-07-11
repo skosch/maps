@@ -33,6 +33,10 @@ sources:
         url: https://elevation3d.arcgis.com/arcgis/rest/services/WorldElevation3D/Terrain3D/ImageServer/tile/{z}/{y}/{x}
         max_zoom: 16
         cache: elevation
+        # How eagerly hillshading/texture-shading drops to a coarser cached zoom while zooming
+        #  out (see TileSource::lodAreaBias's doc comment) - 1.0 is the previous default
+        #  behavior; live-adjustable via the resolution-retention GUI slider (MapsApp).
+        zoom_retention: 1.0
         # 2 years
         max_age: 63072000
         attribution: |
