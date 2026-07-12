@@ -41,55 +41,105 @@ update this section and flag the change prominently in its final report.**
 
 ### Shared primitive: CPU texture-shading sampler
 
-Phases 2 and 3 both need to evaluate "how strongly does texture shading emphasize this
-point" from CPU code running in tile-build worker threads (`TextStyleBuilder` /
-`PointStyleBuilder`), not the GPU fragment shader. This must be a literal CPU port of the
-already-frozen shader formula in `docs/texture-shading-plan.md` — not a new heuristic
-(e.g. not a simple local min/max relief calculation) — so that label-placement decisions
-stay visually consistent with what the hillshade layer actually renders.
+**Updated by Phase 2 (implemented) — read this before starting Phase 3, the signature and
+threading model below are now final, not aspirational.**
 
-- New file: `tangram-es/core/src/util/textureShading.h/.cpp` (or nearest existing
-  location for small shared elevation utilities — check `elevationManager.h/.cpp` first
-  in case it's a more natural home; if so, update this section to say which).
-- Signature (adjust types to match what's actually available, but preserve this shape):
+Phases 2 and 3 both need to evaluate "how strongly does texture shading emphasize this
+point" from CPU code. This must be a literal CPU port of the already-frozen shader formula
+in `docs/texture-shading-plan.md` — not a new heuristic (e.g. not a simple local min/max
+relief calculation) — so that label-placement decisions stay visually consistent with what
+the hillshade layer actually renders.
+
+- New file: `tangram-es/core/src/util/textureShading.h/.cpp`, as originally proposed (not
+  folded into `elevationManager.h/.cpp` — kept separate so it can be unit-tested directly
+  against hand-built `Texture` mosaics, the same way `stitchElevationMosaic()` is tested in
+  `tests/unit/rasterMosaicTests.cpp`, without pulling in `ElevationManager`'s GL/render-state
+  machinery).
+- **Actual signatures** (two functions, not one — see "Threading" below for why):
   ```cpp
-  // Returns the same [0,1]-ish contrast-curved "shade" value the GPU shader would
-  // compute at this world position, using CPU-side buffer reads instead of textureLod.
-  // Returns false via `ok` if the elevation mosaic isn't resident/available here.
-  float sampleTextureShading(const RasterSource& elevationSource,
-                              ProjectedMeters worldPos, bool& ok);
+  // Pure, RasterSource-independent core: evaluate the formula directly against an
+  // already-stitched 3Wp x 3Wp mosaic buffer at worldPos (must fall within tileId's own
+  // footprint). Unit-tested directly with hand-built Texture objects.
+  float sampleTextureShadingAtMosaic(const Texture& mosaic, TileID tileId, ProjectedMeters worldPos);
+
+  // Looks up the mosaic for worldPos via RasterSource::getRaster()/getExistingMosaic()
+  // (cheap, reuse-only — never triggers a new stitch), then delegates to the above.
+  // ok=false if no mosaic is currently resident at that position.
+  float sampleTextureShading(RasterSource& elevationSource, ProjectedMeters worldPos, bool& ok);
   ```
-- **Must reuse the exact formulas already pinned in `docs/texture-shading-plan.md`**:
-  band weight `pow(2.0, -k * alpha)`, contrast curve
-  `az = contrast * z; shade = az / (2*sqrt(1+az*az)) + 0.5`, same `alpha`/`contrast`
-  defaults as the shader uniforms (`u_texture_shading_alpha`, `u_texture_shading_contrast`
-  — read the current values from the scene's `hillshade` style config rather than
-  hardcoding, if that's accessible from a style-builder context; otherwise hardcode the
-  same defaults and flag it).
-- Octave levels are produced by **software box-filter downsampling** of the raw CPU
-  pixel buffer (`Texture::bufferData()`) in place of hardware mip levels — average
-  2×2 blocks repeatedly, matching what `GL_LINEAR_MIPMAP_LINEAR` would produce closely
-  enough for this purpose. Pyramid depth: same `TEXTURE_SHADING_MAX_LEVELS` constant,
-  keep `2^level` well under `W/2` per the corrected note already in
-  `docs/texture-shading-plan.md`.
-- Operates on the same `3W×3W` mosaic buffer layout Phase 2 of the texture-shading plan
-  established (tile's own data in the center third, real or mirror-extrapolated
-  neighbors around it) — do not re-derive a different buffer layout.
-- **Threading**: this is the single biggest open risk in this plan. `TextStyleBuilder`/
-  `PointStyleBuilder::addFeature` run on background tile-worker threads
-  (`tileWorker.cpp`); confirm whether `RasterSource`'s cached `Texture::bufferData()` for
-  the elevation source can be safely read concurrently from such a thread (look at how
-  `RasterSource::getTexture`/`m_textures` synchronization already works, and whether
-  anything mutates that map off the main thread). If genuinely unsafe within reasonable
-  effort, the documented fallback is: compute this once per visible peak **on the main
-  thread**, piggybacking on the existing per-frame label-update pass in
-  `LabelManager`/`Scene::render`, and cache the result on the feature/label so it isn't
-  recomputed every frame. Document whichever path was taken here, since Phase 3 depends
-  on it.
-- **Availability fallback**: if the elevation source/mosaic isn't loaded for a given
-  peak's location (flat/non-terrain map style, or tile not yet cached), `ok = false` and
-  callers fall back to today's behavior (Phase 2: pure elevation weighting; Phase 3: skip
-  the texture-shading term, use only the vector-feature-proximity term).
+  Note `RasterSource&`, not `const RasterSource&` as originally sketched:
+  `getExistingMosaic()`/`getRaster()` aren't `const`-qualified on `RasterSource` (they do
+  `map::find` + `weak_ptr::lock`, not logically-const enough to bother changing).
+- **Formula**: band weight `pow(2.0, -k * alpha)`, contrast curve
+  `az = contrast * z; shade = az / (2*sqrt(1+az*az)) + 0.5` — reused as literally as
+  possible, but see two **deliberate, documented deviations** from a naive port, both
+  explained in `textureShading.cpp`'s comments:
+  - **`alpha`/`contrast` are hardcoded to 0.6/1.0, not read from the live scene config.**
+    These are not the values still written in *this* contract as of the original Phase 2
+    prompt (0.75/0.05) — those were already stale: `docs/texture-shading-plan.md`'s own
+    "Resolution of the open follow-ups" section records the shipped default as having moved
+    to `u_texture_shading_alpha: 0.6` / `u_texture_shading_contrast: 1.0` on 2026-07-06,
+    *without* the top-level Frozen Interface Contract section of that file being updated to
+    match — a real doc/code drift, not a Phase 2 invention. This sampler uses the values
+    that are actually shipped in `hillshade.yaml` today, since matching what the hillshade
+    layer actually renders (this feature's whole stated purpose) requires the current
+    values, not the stale documented ones. **`docs/texture-shading-plan.md`'s Frozen
+    Interface Contract section should be corrected to match its own "Resolution" section
+    the next time someone touches that file** — not done here, out of scope for this
+    plan/branch, flagged instead.
+  - **No zoom-continuity, no auto-contrast.** The live shader (`hillshade.yaml`'s
+    `textureShading()`) has grown well beyond this contract's original formula since it was
+    written: a fractional base LOD anchored to continuous view zoom, zoom-dependent
+    `alpha`/`alpha_min` blending, and a live `u_texture_shading_auto` contrast multiplier
+    driven by `RasterSource::aggregateRugosity()`. This sampler intentionally does **not**
+    replicate any of that: it always evaluates at the mosaic's native (level 0) resolution
+    with fixed alpha/contrast, because a peak-priority ranking needs one stable number per
+    peak, not a value that changes as the camera pans/zooms/tilts. This is a scope
+    simplification, not a bug — flagged clearly in `textureShading.h`'s doc comment for
+    Phase 3 to be aware of if it reuses this sampler for anchor-cost scoring.
+- Octave levels are produced by **software box-filter downsampling** of the raw CPU pixel
+  buffer (`Texture::bufferData()`), 2×2 averaging repeated `kMaxLevels = 4` times (the
+  contract's original, conservative `TEXTURE_SHADING_MAX_LEVELS` default — *not* the
+  shader's current, larger `TEXTURE_SHADING_MAX_LEVELS = 8`, which is only safe there
+  because of the shader's fractional base LOD; see `textureShading.cpp` for the full
+  reasoning).
+- Operates on the same `3Wp×3Wp` mosaic buffer layout the texture-shading plan established
+  (tile's own data in the center third at `muv = (uv+1)/3`, real-or-mirror-extrapolated
+  neighbors around it) — no new buffer layout introduced.
+- **Threading — resolved, this was the single biggest open risk in this plan.**
+  `TextStyleBuilder`/`PointStyleBuilder::addFeature` run on background `TileWorker` threads
+  (confirmed: `tileWorker.cpp`'s `TileWorker::run()` calls `task->process(*builder)`, which
+  is what invokes `TileBuilder::build()` → `applyStyling()` → `StyleBuilder::addFeature()`,
+  entirely inside the worker loop). Meanwhile `RasterSource::m_textures`/`m_mosaics` — and
+  therefore `getTexture()`/`getExistingMosaic()`, which the sampler needs — are documented
+  and relied upon elsewhere in this codebase as **main-thread-only**: `rasterSource.h`'s own
+  comments state mosaics are built/patched "Main-thread only, like all other m_mosaics
+  access", and `RasterTileTask::addRaster()` (which does the actual stitching/patching) only
+  ever runs from `complete()`/`complete(TileTask&)`, invoked from
+  `TileManager::TileEntry::completeTileTask()` on the main thread — never from
+  `TileWorker::run()`. Separately, even ignoring thread-safety, the elevation raster
+  subtask is attached to a vector tile's `Tile::rasters()` inside that same main-thread
+  `complete()` call, which runs *after* `process()` (where `addFeature()` runs) has already
+  finished for that tile — so at the point `PointStyleBuilder::addFeature()` executes, the
+  peak's own tile doesn't even have a raster/mosaic attached yet, safety aside.
+  **Conclusion: calling the sampler from `TextStyleBuilder`/`PointStyleBuilder::addFeature`
+  is unsafe and was not attempted.** The documented fallback was used: priority refinement
+  happens once per visible peak **on the main thread**, in
+  `LabelManager::processLabelUpdate()` (piggybacking on the same per-label loop that already
+  does `Label::setElevation()`/`m_elevationSet` for terrain height, right next to it),
+  cached on the label via a new `Label::m_prominenceRefined` flag mirroring
+  `m_elevationSet`'s "retry every frame until success, then stop" pattern. See Phase 2's
+  writeup below for the full mechanism (new `Label::Options::refinePriorityWithTextureShading`
+  flag, new `priority_texture_shading` style param, `Label::refinePriority()`).
+- **Availability fallback**: if the elevation source/mosaic isn't loaded for a given peak's
+  location (flat/non-terrain map style, or tile not yet cached), `ok = false` and callers
+  fall back to today's behavior (Phase 2: pure elevation weighting; Phase 3: skip the
+  texture-shading term, use only the vector-feature-proximity term). Implemented in Phase 2
+  as: the tile-build-time `priority:` JS function always computes elevation-only priority as
+  a *provisional* value first; `Label::refinePriority()` overwrites it later, only once
+  `sampleTextureShading()` returns `ok = true` for that peak's position — permanently
+  provisional (never refined) is a legitimate, expected steady state for non-terrain map
+  styles, not an error.
 
 ### Shared primitive: anchor candidate geometry
 
@@ -101,6 +151,44 @@ label's measured text bounding box offset from the icon anchor by
 `icon_radius + half_label_extent` in the anchor's direction — reuse
 `LabelProperty::anchorDirection()` (`labelProperty.cpp:35-51`) for the direction vector
 rather than re-deriving it.
+
+### Addendum from Phase 3 (implemented — read before Phase 6 integration)
+
+Phase 3 (salience-aware anchor ordering) is implemented on branch
+`label-placement-phase3-anchors`. Two clarifications to the contract above, plus one
+noted deviation:
+
+- **Architecture question resolved**: a single style's `StyleBuilder::addFeature` pass
+  (e.g. `peak`'s `PointStyleBuilder`/linked `TextStyleBuilder`) does **not** have access
+  to other layers' raw feature geometry — it only ever sees the feature(s) its own
+  matched draw rule(s) passed it. The answer is the shared per-tile pre-pass the plan
+  anticipated: `TileBuilder::build()` (`tangram-es/core/src/tile/tileBuilder.cpp`) already
+  receives the tile's full `TileData` (all layers together, since this app's whole vector
+  schema is one `osm` source) before any style's `setup()`/`addFeature()` runs. A new
+  `AnchorOccupancyGrid` (`tangram-es/core/src/labels/anchorOccupancyGrid.h/.cpp`) is built
+  once there from the `water`/`transportation` layers (coarse 16x16 grid over the tile's
+  normalized `[0,1]` local space, line/polygon-boundary rasterization only, no fill) and
+  attached to the `Tile` object itself (`Tile::setAnchorOccupancyGrid`/
+  `anchorOccupancyGrid()`), which every style's builder already receives in `setup(const
+  Tile&)` — so `TextStyleBuilder` just reads it off the tile it's already handed.
+- **Anchor-cost hook point**: not `applyRule()` (`textStyleBuilder.cpp` ~684-733) as
+  originally scoped — that function runs before any feature geometry/position is known,
+  so it cannot see where a label will actually land. The actual reordering happens at the
+  call sites that *do* have a position, right before each `addLabel(...)` call:
+  `PointStyleBuilder::addFeature` (icon+text, e.g. peak labels) and
+  `TextStyleBuilder::addFeature`'s point/polygon-centroid branches (standalone text).
+  Both call the new public `TextStyleBuilder::salienceOrderedAnchors(...)`, which returns
+  `Options::anchors` re-sorted by ascending cost; the existing anchor-cycling mechanism
+  (`Label::nextAnchor()`, `LabelManager::handleOcclusions`) is untouched.
+- **Deviation from the Frozen Interface Contract's `sampleTextureShading` signature**:
+  Phase 3's stub (`tangram-es/core/src/util/textureShading.h/.cpp`) takes
+  `const RasterSource*` (nullable pointer) instead of `const RasterSource&`. Phase 3 has
+  no elevation `RasterSource` plumbed into `TextStyleBuilder`/`PointStyleBuilder` (that's
+  Phase 2/6's job, including the threading-safety question), so a nullable pointer is
+  what's actually available; the contract's own text permits adjusting types "to preserve
+  this shape." Phase 3's only caller always passes `nullptr`, so the term always
+  contributes 0 today. **Phase 6 must decide** whether to keep the pointer or restore the
+  reference once a real source exists, and update this note accordingly.
 
 ## Phase 1 — Fonts & unbounded wrapping
 
@@ -153,8 +241,58 @@ IBM Plex Serif Italic, and make long/multi-language names wrap instead of trunca
 
 ## Phase 2 — Prominence-weighted peak priority
 
-**Objective:** rank peak label priority by real topographic salience instead of raw
-elevation alone.
+**Implemented (branch `label-placement-phase2-prominence`, off `master`). Summary of what
+was actually built, and two corrections to the design prose below:**
+
+- **`feature.prominence` availability was mis-cited, but the underlying claim holds.** The
+  design section below says it's "already parsed e.g. `osm-place-info.js:159-160`" — that's
+  wrong: that file's `prominence` read is inside `osmPlaceInfoCb()`, a runtime callback for
+  the tap-to-query info-panel plugin that parses a *live Overpass API HTTP response*, not a
+  vector-tile feature property. However, `assets/scenes/stylus-osm.yaml`'s own `peak` draw
+  rule already filters on `{ prominence: true }` (`filter.all[0].any`, gating which peaks
+  show below z12) — proof the vector tile schema already carries `prominence` as an ordinary
+  feature property, in the exact same `feature.*` namespace as `feature.ele`, reachable from
+  the `priority:` JS function with **no C++ parsing change needed**. So the "??" fallback
+  chain's first branch was free; no `mvt.cpp`/`geoJson.cpp`/`StyleContext` attachment
+  mechanism needed to be added for it.
+- **The synthetic-property idea in the design's "Files" note below was not used.** Rather
+  than attaching a `feature.__texture_shading` property before the JS `priority:` function
+  runs (which would require computing it at tile-build time — impossible per the Frozen
+  Interface Contract's threading resolution above), priority is instead a **two-stage**
+  value: the JS `priority:` function computes a final value immediately if
+  `feature.prominence` is present (no threading concern, see above), or a *provisional*
+  elevation-only value otherwise; `Label::refinePriority()` then overwrites the provisional
+  value later, on the main thread, once the CPU sampler succeeds for that peak's position.
+  The mechanism that tells C++ "this label wants that later refinement" **is** a new
+  synthetic bit, just not a `feature.*` JS property — see below.
+
+**Files actually touched:**
+- `tangram-es/core/src/util/textureShading.h/.cpp` (new) — the CPU sampler, per the Frozen
+  Interface Contract above.
+- `tangram-es/core/src/labels/label.h/.cpp` — new `Label::Options::refinePriorityWithTextureShading`
+  flag; new `Label::m_prominenceRefined` flag + `Label::refinePriority()` method; new
+  `Label::m_trackRelativePriority` flag + `Label::syncRelativePriority()` method (needed
+  because `setRelative()` only copies an icon's priority into its linked text label
+  **once**, at tile-build time — a peak's text label needs to keep re-copying it every frame
+  so it doesn't go stale once `refinePriority()` starts mutating the icon's priority later,
+  on the main thread, in a different `LabelManager::processLabelUpdate()` call for a
+  different style).
+- `tangram-es/core/src/labels/labelManager.cpp` — `processLabelUpdate()` calls
+  `label->syncRelativePriority()` for every label, and `label->refinePriority(...)` next to
+  the existing `label->setElevation(...)` call, same "retry every frame until success, then
+  cache" pattern as `m_elevationSet`.
+- `tangram-es/core/src/scene/styleParam.h/.cpp` — new `StyleParamKey::priority_texture_shading`
+  boolean style param (mirrors `collide`/`flat`'s existing pattern exactly).
+- `tangram-es/core/src/style/pointStyleBuilder.cpp` — reads the new style param into
+  `Parameters.labelOptions.refinePriorityWithTextureShading`; `addPoint`/`addLine`/`addPolygon`
+  suppress it per-feature when `_props.contains("prominence")` (real tag already produced a
+  final priority in JS, so the later main-thread refinement must not overwrite it with the
+  weaker proxy).
+- `assets/scenes/stylus-osm.yaml` — peak draw rule: `priority:` function now branches on
+  `feature.prominence`; new `priority_texture_shading: true` opts the peak draw rule into
+  the main-thread refinement.
+
+**Original design section (kept for context; superseded by the above where they differ):**
 
 **Files:** wherever the Frozen Interface Contract's shared sampler lands (new
 `textureShading.h/.cpp` or `elevationManager.*`), `assets/scenes/stylus-osm.yaml` (peak
@@ -354,6 +492,41 @@ utility), `tangram-es/core/src/style/textStyleBuilder.cpp` (polygon-label branch
 4. Single commit (or small series) on a `label-placement-phase6-integration` branch.
    **Do not merge to `master` or push to any remote — stop and hand back for human
    review**, per this project's standing git safety rules.
+
+**Actually done (2026-07-12):** all 5 phase branches merged cleanly (submodule and outer
+repo), one real conflict resolved (`util/textureShading.{h,cpp}` add/add between Phase 2's
+real implementation and Phase 3's explicit stub — kept Phase 2's, and removed Phase 3's
+texture-shading anchor-cost term entirely rather than wiring it up, since it runs on a
+TileWorker thread where the sampler is provably unsafe to call — see
+`anchorCandidateCost()`'s comment). `make -f tests.mk` (2015 assertions/182 cases) and full
+Release build passed after every merge step.
+
+**One real bug found by the headless smoke test that unit tests could not catch** (they
+don't compile real GLSL): Phase 4's halo uniforms (`u_halo_luminance_dark`/`_light`) were
+declared via the YAML `styles: text: shaders: uniforms:` mechanism, which only configures
+*one* `Style` object per name. `sdf.fs` is shared by several distinct `TextStyle`-derived
+objects beyond the "text" built-in — "contour-labels" (a separate built-in), plus an
+implicit companion `TextStyle` created per point style that has a linked text child
+(confirmed via targeted logging: "points", "poi-points", "track-markers", "loc-points" each
+silently build a second, sdf.fs-based shader alongside their point.fs one). Every one of
+those needed the same declaration, and the YAML mechanism can't reach them all. Fixed by
+hardcoding both uniforms directly in `sdf.fs` (like `u_background_tex`) and setting their
+values unconditionally in `TextStyle::onBeginDrawFrame` — trading away live GUI-slider
+tuning (removed) for guaranteed correctness across every style instance. Worth remembering
+for any future per-style YAML shader config targeting a built-in name: check whether that
+built-in's shader source is shared by other Style objects first.
+
+Two font files (`IBMPlexSans_Condensed-SemiBold.ttf`, `IBMPlexSerif-Italic.otf`) are
+present in every worktree used this session but are **not committed anywhere** — see Phase
+1's report: `assets/shared` is itself a submodule (`pbsurf/maps-res`) that's untracked-file
+-ignored, so these need to be pushed there separately before this branch is usable outside
+worktrees that already have them copied in.
+
+Final headless screenshot (`docs/label-placement-plan.md` Phase 6, South-Coast BC/Howe
+Sound area) confirmed clean rendering with no shader/GL errors — full visual sign-off on
+font sizing, halo thresholds, prominence ranking, anchor placement, and curve quality is
+still Sebastian's to do (per Phase 5 of `texture-shading-plan.md`'s precedent, this is not
+an agent judgment call). Not merged to `master`, not pushed.
 
 ## Verification approach
 
