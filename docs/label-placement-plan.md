@@ -102,6 +102,44 @@ label's measured text bounding box offset from the icon anchor by
 `LabelProperty::anchorDirection()` (`labelProperty.cpp:35-51`) for the direction vector
 rather than re-deriving it.
 
+### Addendum from Phase 3 (implemented — read before Phase 6 integration)
+
+Phase 3 (salience-aware anchor ordering) is implemented on branch
+`label-placement-phase3-anchors`. Two clarifications to the contract above, plus one
+noted deviation:
+
+- **Architecture question resolved**: a single style's `StyleBuilder::addFeature` pass
+  (e.g. `peak`'s `PointStyleBuilder`/linked `TextStyleBuilder`) does **not** have access
+  to other layers' raw feature geometry — it only ever sees the feature(s) its own
+  matched draw rule(s) passed it. The answer is the shared per-tile pre-pass the plan
+  anticipated: `TileBuilder::build()` (`tangram-es/core/src/tile/tileBuilder.cpp`) already
+  receives the tile's full `TileData` (all layers together, since this app's whole vector
+  schema is one `osm` source) before any style's `setup()`/`addFeature()` runs. A new
+  `AnchorOccupancyGrid` (`tangram-es/core/src/labels/anchorOccupancyGrid.h/.cpp`) is built
+  once there from the `water`/`transportation` layers (coarse 16x16 grid over the tile's
+  normalized `[0,1]` local space, line/polygon-boundary rasterization only, no fill) and
+  attached to the `Tile` object itself (`Tile::setAnchorOccupancyGrid`/
+  `anchorOccupancyGrid()`), which every style's builder already receives in `setup(const
+  Tile&)` — so `TextStyleBuilder` just reads it off the tile it's already handed.
+- **Anchor-cost hook point**: not `applyRule()` (`textStyleBuilder.cpp` ~684-733) as
+  originally scoped — that function runs before any feature geometry/position is known,
+  so it cannot see where a label will actually land. The actual reordering happens at the
+  call sites that *do* have a position, right before each `addLabel(...)` call:
+  `PointStyleBuilder::addFeature` (icon+text, e.g. peak labels) and
+  `TextStyleBuilder::addFeature`'s point/polygon-centroid branches (standalone text).
+  Both call the new public `TextStyleBuilder::salienceOrderedAnchors(...)`, which returns
+  `Options::anchors` re-sorted by ascending cost; the existing anchor-cycling mechanism
+  (`Label::nextAnchor()`, `LabelManager::handleOcclusions`) is untouched.
+- **Deviation from the Frozen Interface Contract's `sampleTextureShading` signature**:
+  Phase 3's stub (`tangram-es/core/src/util/textureShading.h/.cpp`) takes
+  `const RasterSource*` (nullable pointer) instead of `const RasterSource&`. Phase 3 has
+  no elevation `RasterSource` plumbed into `TextStyleBuilder`/`PointStyleBuilder` (that's
+  Phase 2/6's job, including the threading-safety question), so a nullable pointer is
+  what's actually available; the contract's own text permits adjusting types "to preserve
+  this shape." Phase 3's only caller always passes `nullptr`, so the term always
+  contributes 0 today. **Phase 6 must decide** whether to keep the pointer or restore the
+  reference once a real source exists, and update this note accordingly.
+
 ## Phase 1 — Fonts & unbounded wrapping
 
 **Objective:** switch peak labels to IBM Plex Sans Condensed SemiBold and water labels to
