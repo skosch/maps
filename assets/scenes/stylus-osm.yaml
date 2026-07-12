@@ -741,6 +741,85 @@ layers:
           alpha: 0.5
           width: 8px
 
+  # Phase 5 (docs/label-placement-plan.md): national-park / protected-area / forest labels,
+  # drawn from the actual `landuse` polygon geometry so TextStyleBuilder can curve the
+  # label along an elongated shape's principal axis. This replaces the pre-baked centroid
+  # point that `pois > landuse` used to draw (now disabled there, see the comment at that
+  # rule) -- filter conditions mirror it exactly for visual parity otherwise.
+  landuse_name:
+    data: { source: osm, layer: landuse }
+    exclusive: true
+    filter:
+      name: true
+      area: { min: 1500px2 }
+      # give park POI (w/ icon) priority
+      not: { leisure: [park, golf_course] }
+      any:
+        - { boundary: national_park, $zoom: { min: 8 } }
+        - {
+            protect_class: ["1", "1a", "1b", "2", "3", "5"],
+            $zoom: { min: 10 },
+          }
+        - { natural: [glacier], $zoom: { min: 10 } }
+        - { landuse: [commercial, retail, winter_sports], $zoom: { min: 12 } }
+        - {
+            landuse: [industrial, military],
+            area: { min: 5000px2 },
+            $zoom: { min: 10 },
+          }
+        - { amenity: prison, area: { min: 5000px2 }, $zoom: { min: 12 } }
+    draw:
+      text:
+        interactive: true
+        text_source: global.names_one_line
+        transition: { show: { time: 0s }, hide: { time: 1s } }
+        max_lines: 4
+        priority: global.priority.forest
+        font:
+          family: global.primary_font
+          size: 12px
+          style: italic
+          fill: global.color.park_name
+          stroke: { color: global.color.park_halo, width: 3 }
+    commercial:
+      filter:
+        - {
+            landuse:
+              [commercial, retail, industrial, military, winter_sports],
+          }
+        - { amenity: prison }
+      draw:
+        {
+          text:
+            {
+              font:
+                {
+                  fill: global.color.landuse_name,
+                  stroke: { color: global.color.default_halo },
+                },
+            },
+        }
+    national_park:
+      filter: { boundary: national_park }
+      draw: { text: { priority: global.priority.national_park } }
+    glacier:
+      filter: { natural: glacier }
+      draw:
+        text:
+          priority: global.priority.water
+          font:
+            size: 11px
+            fill: global.color.water_name
+            stroke: { color: global.color.water_halo, width: 3 }
+    # don't show label for huge area (where boundries may be offscreen) beyond z12
+    hide:
+      filter:
+        [
+          { access: [no, private] },
+          { area: { min: 350000px2 }, $zoom: { min: 12 } },
+        ]
+      draw: { text: { visible: false } }
+
   landuse_misc:
     data: { source: osm, layer: landuse }
     glacier:
@@ -839,9 +918,13 @@ layers:
 
   water_name:
     data: { source: osm, layer: water }
+    # Phase 5 (docs/label-placement-plan.md): read the actual water polygon geometry (not
+    # just the legacy point layer) so TextStyleBuilder can curve the label along an
+    # elongated lake's principal axis; $geometry: point stays as a fallback for the rare
+    # cases (e.g. natural=bay tagged on a single node) where only a point exists.
     filter:
       name: true
-      $geometry: point
+      $geometry: [polygon, point]
       any: [{ $zoom: { min: 17 } }, { area: { min: 500px2 } }]
     draw:
       text:
@@ -1843,8 +1926,16 @@ layers:
           - { amenity: prison, area: { min: 5000px2 }, $zoom: { min: 12 } }
       draw:
         points: { visible: false }
+        # Phase 5 (docs/label-placement-plan.md): this pre-baked centroid-point label is
+        # superseded by the `landuse_name` layer below, which draws from the actual
+        # landuse polygon geometry (curving the label along its principal axis when
+        # elongated) -- kept here, disabled, as the documented fallback path rather than
+        # deleted outright. Left enabled, this would duplicate every label, since the tile
+        # source emits a same-named point here *and* a same-named polygon in `landuse`
+        # for every one of these features (see scripts/tilemaker/process.lua's
+        # LayerAsCentroid("poi")/LayerAsCentroid("poi_detail") calls).
         text:
-          visible: true
+          visible: false
           priority: global.priority.forest
           font:
             fill: global.color.park_name
