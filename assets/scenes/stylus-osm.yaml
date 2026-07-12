@@ -409,23 +409,6 @@ application:
     show_transit: { label: Transit }
     show_parking: { label: Parking }
     #show_motorways: { label: Motorways }
-    # Background-adaptive text halo (docs/label-placement-plan.md Phase 4): sdf.fs's stroke
-    # pass fades the halo out as the composited background luminance underneath rises from
-    # u_halo_luminance_dark (halo at full strength at/below this) to u_halo_luminance_light
-    # (halo fully invisible at/above this) - see styles.text.shaders.uniforms below for the
-    # defaults. NOT yet visually tuned against real map imagery - adjust by eye.
-    u_halo_luminance_dark:
-      style: text
-      label: Halo Fade Start (Dark)
-      min: 0
-      max: 1
-      step: 0.05
-    u_halo_luminance_light:
-      style: text
-      label: Halo Fade End (Light)
-      min: 0
-      max: 1
-      step: 0.05
 
   # specify fields indexed for search and filter to select indexed features
   search_data:
@@ -505,19 +488,6 @@ cameras:
 #textures:
 
 styles:
-  # Background-adaptive text halo (docs/label-placement-plan.md Phase 4). "text" is a
-  # built-in style (constructed in C++, SceneLoader::applyStyles) - this entry doesn't
-  # define a new style (no "base:"/"mix:"), it attaches shader uniforms onto the existing
-  # built-in instance, the same "shaders: uniforms:" mechanism styles normally get via
-  # `base:`/`mix:` (see hillshade.yaml's u_texture_shading_* for the established pattern).
-  # Defaults below are NOT visually tuned yet - see the gui_variables entries above
-  # (application.gui_variables.u_halo_luminance_dark/_light) for live adjustment.
-  text:
-    shaders:
-      uniforms:
-        u_halo_luminance_dark: 0.35
-        u_halo_luminance_light: 0.75
-
   # blend_order -1000 to draw buildings just above other geometry; blend_order -110 to -100 reserved by app
   heightglow:
     base: polygons
