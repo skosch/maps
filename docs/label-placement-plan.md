@@ -493,6 +493,41 @@ utility), `tangram-es/core/src/style/textStyleBuilder.cpp` (polygon-label branch
    **Do not merge to `master` or push to any remote — stop and hand back for human
    review**, per this project's standing git safety rules.
 
+**Actually done (2026-07-12):** all 5 phase branches merged cleanly (submodule and outer
+repo), one real conflict resolved (`util/textureShading.{h,cpp}` add/add between Phase 2's
+real implementation and Phase 3's explicit stub — kept Phase 2's, and removed Phase 3's
+texture-shading anchor-cost term entirely rather than wiring it up, since it runs on a
+TileWorker thread where the sampler is provably unsafe to call — see
+`anchorCandidateCost()`'s comment). `make -f tests.mk` (2015 assertions/182 cases) and full
+Release build passed after every merge step.
+
+**One real bug found by the headless smoke test that unit tests could not catch** (they
+don't compile real GLSL): Phase 4's halo uniforms (`u_halo_luminance_dark`/`_light`) were
+declared via the YAML `styles: text: shaders: uniforms:` mechanism, which only configures
+*one* `Style` object per name. `sdf.fs` is shared by several distinct `TextStyle`-derived
+objects beyond the "text" built-in — "contour-labels" (a separate built-in), plus an
+implicit companion `TextStyle` created per point style that has a linked text child
+(confirmed via targeted logging: "points", "poi-points", "track-markers", "loc-points" each
+silently build a second, sdf.fs-based shader alongside their point.fs one). Every one of
+those needed the same declaration, and the YAML mechanism can't reach them all. Fixed by
+hardcoding both uniforms directly in `sdf.fs` (like `u_background_tex`) and setting their
+values unconditionally in `TextStyle::onBeginDrawFrame` — trading away live GUI-slider
+tuning (removed) for guaranteed correctness across every style instance. Worth remembering
+for any future per-style YAML shader config targeting a built-in name: check whether that
+built-in's shader source is shared by other Style objects first.
+
+Two font files (`IBMPlexSans_Condensed-SemiBold.ttf`, `IBMPlexSerif-Italic.otf`) are
+present in every worktree used this session but are **not committed anywhere** — see Phase
+1's report: `assets/shared` is itself a submodule (`pbsurf/maps-res`) that's untracked-file
+-ignored, so these need to be pushed there separately before this branch is usable outside
+worktrees that already have them copied in.
+
+Final headless screenshot (`docs/label-placement-plan.md` Phase 6, South-Coast BC/Howe
+Sound area) confirmed clean rendering with no shader/GL errors — full visual sign-off on
+font sizing, halo thresholds, prominence ranking, anchor placement, and curve quality is
+still Sebastian's to do (per Phase 5 of `texture-shading-plan.md`'s precedent, this is not
+an agent judgment call). Not merged to `master`, not pushed.
+
 ## Verification approach
 
 - Each phase: project builds clean (`make`, Release), relevant unit tests pass
