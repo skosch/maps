@@ -6,10 +6,13 @@
 #include <sys/stat.h>
 #include <fstream>
 #include <chrono>
+#include <thread>
+#include <algorithm>
 // for elevation
 #include "util/elevationManager.h"
 #include "data/rasterSource.h"
 #include "debug/frameInfo.h"
+#include "debug/profiler.h"
 
 #include "touchhandler.h"
 #include "bookmarks.h"
@@ -52,6 +55,7 @@ YAML::Node MapsApp::config;
 std::string MapsApp::configFile;
 bool MapsApp::metricUnits = true;
 bool MapsApp::terrain3D = true;
+bool MapsApp::textureShading = false;
 sqlite3* MapsApp::bkmkDB = NULL;
 SQLiteDB MapsApp::placesDB;
 std::vector<Color> MapsApp::markerColors;
@@ -786,6 +790,9 @@ void MapsApp::loadSceneFile(bool async, bool setPosition)
   options.updates.push_back(SceneUpdate{"scene.elevation_source",
       cfg()["sources"]["elevation"][0].as<std::string>("")});
   if(terrain3D) { options.updates.push_back(SceneUpdate{"scene.terrain_3d", "true"}); }
+  // compiles in the ELEVATION_MOSAIC shader path and enables neighbor prefetch + mosaic
+  //  stitching for the elevation source (see elevation.yaml, hillshade.yaml, scene.cpp)
+  if(textureShading) { options.updates.push_back(SceneUpdate{"global.elevation_mosaic", "true"}); }
   options.updates.push_back(SceneUpdate{"global.metric_units", metricUnits ? "true" : "false"});
   options.updates.push_back(SceneUpdate{"global.shuffle_seed", std::to_string(shuffleSeed)});
   options.updates.push_back(SceneUpdate{"global.selected_osm_id", "~"});  // ensure Node exists
@@ -799,8 +806,11 @@ void MapsApp::loadSceneFile(bool async, bool setPosition)
   FSPath basePath(baseDir);
   for(const auto& font : cfg()["fallback_fonts"])
     options.fallbackFonts.push_back(Tangram::FontSourceHandle(Url(basePath.child(font.Scalar()).path)));
-  // single worker much easier to debug (alternative is gdb scheduler-locking option)
-  options.numTileWorkers = cfg()["tangram"]["num_tile_workers"].as<int>(2);
+  // single worker much easier to debug (alternative is gdb scheduler-locking option); default
+  // scales with core count on desktop since vector builds + raster decodes both serialize onto
+  // these workers (tile-pipeline-perf-plan.md R3) - config override always wins.
+  int defaultTileWorkers = std::min(6, std::max(2, int(std::thread::hardware_concurrency()) - 2));
+  options.numTileWorkers = cfg()["tangram"]["num_tile_workers"].as<int>(defaultTileWorkers);
   dumpJSStats(NULL);  // reset stats
   persistBounds = false;  // reset persistent bounds state
   map->loadScene(std::move(options), async);
@@ -821,6 +831,7 @@ void MapsApp::sendMapEvent(MapEvent_t event)
 
 void MapsApp::mapUpdate(double time)
 {
+  PROFILE_SCOPE("MapUpdate");
   static double lastFrameTime = 0;
 
   // handle scene completion ourselves to perform necessary setup before first update
@@ -851,6 +862,17 @@ void MapsApp::mapUpdate(double time)
     std::replace(credits.begin(), credits.end(), '\n', ' ');
     attribText->setText(credits.c_str());
     attribText->setVisible(true);
+    // Restore persisted resolution-retention bias (see TileSource::lodAreaBias, MapsSources::
+    // populateSceneVars) here too, not just when the settings panel happens to be opened -
+    // otherwise a value the user dialed in during a previous session would silently reset to
+    // the scene's default until they reopened that panel. Same for the overzoom step-width
+    // (TileSource::overzoomStepExponent, MapsSources::populateSceneVars).
+    for(auto& src : map->getScene()->tileSources()) {
+      auto& biasCfg = config["resolution_bias"][src->name()];
+      if(biasCfg) { src->setLodAreaBias(biasCfg.as<float>(src->lodAreaBias())); }
+      auto& stepCfg = config["overzoom_step"][src->name()];
+      if(stepCfg) { src->setOverzoomStepExponent(stepCfg.as<float>(src->overzoomStepExponent())); }
+    }
     sendMapEvent(SCENE_LOADED);
   }
   else
@@ -864,6 +886,41 @@ void MapsApp::mapUpdate(double time)
     updateLocMarker();
     platform->notifyRender();  // clear requestRender() from marker update
     locMarkerNeedsUpdate = false;
+  }
+
+  // Texture shading auto-contrast: drive u_texture_shading_auto from the regional ruggedness
+  //  statistic aggregated over all live elevation mosaics (roughly the visible tiles plus the
+  //  prefetched neighbor ring, i.e. a window a few times the viewport - so panning shifts the
+  //  target only gradually as tiles enter/leave the window), and slew-limit the uniform
+  //  (~0.7 s time constant) so any remaining steps ease in instead of popping. Flat regions
+  //  get their landform structure boosted, high mountains stop clipping, and the
+  //  "Texture Shading Contrast" GUI slider still multiplies on top as a manual trim.
+  if(textureShading) {
+    static double lastAutoContrastTime = 0;
+    auto elevSrc = std::static_pointer_cast<Tangram::RasterSource>(getElevationSource());
+    float rug = elevSrc ? elevSrc->aggregateRugosity() : -1.f;
+    if(rug > 1e-6f) {
+      // 0.35/rug ~= 1.0 for moderately rugged terrain (calibrated on BC Coast Mountains at
+      //  z11-13); clamped so plains don't dissolve into amplified noise and extreme relief
+      //  keeps some structure
+      float target = std::min(std::max(0.35f/rug, 0.3f), 3.0f);
+      float dt = lastAutoContrastTime > 0 ? float(time - lastAutoContrastTime) : 1e6f;
+      texShadingAutoContrast += (target - texShadingAutoContrast)*std::min(1.f, dt/0.7f);
+      for(auto& style : map->getScene()->styles()) {
+        if(style->getName() != "hillshade") { continue; }
+        for(auto& uniform : style->styleUniforms()) {
+          if(uniform.first.name == "u_texture_shading_auto" && uniform.second.is<float>()) {
+            if(std::abs(uniform.second.get<float>() - texShadingAutoContrast) > 0.002f) {
+              uniform.second.set<float>(texShadingAutoContrast);
+              platform->requestRender();
+            }
+            break;
+          }
+        }
+        break;
+      }
+    }
+    lastAutoContrastTime = time;
   }
 
   mapState = map->update(time - lastFrameTime);
@@ -1248,6 +1305,32 @@ std::string MapsApp::distKmToStr(double dist, int prec, int sigdig)
   if(dist < 0.1 || (dist < 1 && prec > 1))
     return fstring("%.0f m", dist*1000);
   return fstring("%.*f km", prec, dist);
+}
+
+void MapsApp::toggleProfilerCapture()
+{
+  using namespace Tangram;
+  static std::string tracePath;
+  if(Profiler::isCapturing()) {
+    Profiler::stopCapture();
+    LOGW("Profiler trace written to %s", tracePath.c_str());
+    return;
+  }
+  FSPath profDir(baseDir, "profiles/");
+  if(!profDir.exists() && !createPath(profDir)) {
+    LOGE("Profiler: unable to create %s", profDir.c_str());
+    return;
+  }
+  char timestr[32];
+  time_t now = time(NULL);
+  strftime(timestr, sizeof(timestr), "%Y%m%d-%H%M%S", localtime(&now));
+  tracePath = profDir.child(::fstring("trace-%s.json", timestr)).path;
+  Profiler::startCapture(tracePath);
+  Profiler::meta("version", versionStr);
+  auto campos = map->getCameraPosition();
+  Profiler::meta("camera", ::fstring("lng=%.6f lat=%.6f zoom=%.3f rot=%.1fdeg tilt=%.1fdeg",
+      campos.longitude, campos.latitude, campos.zoom, campos.rotation*180/M_PI, campos.tilt*180/M_PI));
+  LOGW("Profiler capture started: %s", tracePath.c_str());
 }
 
 void MapsApp::dumpTileContents(float x, float y)
@@ -1639,6 +1722,16 @@ void MapsApp::createGUI(SDL_Window* sdlWin)
   terrain3dCb->setChecked(terrain3D);
   overflowMenu->addItem(terrain3dCb);
 
+  textureShadingCb = createCheckBoxMenuItem("Texture shading");
+  textureShadingCb->onClicked = [=](){
+    textureShading = !textureShading;
+    config["texture_shading"]["enabled"] = textureShading;
+    textureShadingCb->setChecked(textureShading);
+    mapsSources->rebuildSource(mapsSources->currSource);
+  };
+  textureShadingCb->setChecked(textureShading);
+  overflowMenu->addItem(textureShadingCb);
+
   Button* themeCb = createCheckBoxMenuItem("Light theme");
   themeCb->onClicked = [=](){
     bool light = !themeCb->checked();
@@ -1737,6 +1830,13 @@ void MapsApp::createGUI(SDL_Window* sdlWin)
       LOGW("Scene YAML dumped to %s", filename.c_str());
     });
     appDebugMenu->addItem("Print JS stats", [this](){ dumpJSStats(map->getScene()); });
+    Button* profilerCb = createCheckBoxMenuItem("Profiler capture");
+    profilerCb->setChecked(Tangram::Profiler::isCapturing());
+    profilerCb->onClicked = [=](){
+      toggleProfilerCapture();
+      profilerCb->setChecked(Tangram::Profiler::isCapturing());
+    };
+    appDebugMenu->addItem(profilerCb);
     appDebugMenu->addItem("Set location", setLocFn);
     overflowMenu->addSubmenu("App debug", appDebugMenu);
   }
@@ -2307,6 +2407,14 @@ bool MapsApp::loadConfig(const char* assetPath)
     }
   }
 
+  // land cover polygons now drape over 3D terrain (see hillshade.yaml), so drop the obsolete
+  //  default update (carried over from older versions' config.default.yaml) that hid them in 3D;
+  //  unconditional (not gated on a version bump) because versionCode is the git *tag* count and
+  //  does not change between dev builds - the app never writes this key anymore, and hiding
+  //  polygons is handled by the "Polygons" GUI checkbox instead
+  if(config["terrain_3d"]["updates"].has("global.show_land_polygons"))
+    config["terrain_3d"]["updates"].remove("global.show_land_polygons");
+
   return prevVersion < versionCode;
 }
 
@@ -2356,6 +2464,7 @@ MapsApp::MapsApp(Platform* _platform) : touchHandler(new TouchHandler(this))
   mainThreadId = std::this_thread::get_id();
   metricUnits = cfg()["metric_units"].as<bool>(true);
   terrain3D = cfg()["terrain_3d"]["enabled"].as<bool>(false);
+  textureShading = cfg()["texture_shading"]["enabled"].as<bool>(false);
   // Google Maps and Apple Maps use opposite scaling for this gesture, so definitely needs to be configurable
   touchHandler->dblTapDragScale = cfg()["gestures"]["dbl_tap_drag_scale"].as<float>(1.0f);
   shuffleSeed = cfg()["random_shuffle_seed"].as<bool>(true) ? std::rand() : 0;

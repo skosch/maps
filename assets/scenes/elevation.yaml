@@ -1,5 +1,31 @@
 # elevation.yaml
 
+global:
+    # Texture shading (docs/texture-shading-plan.md): when true, the elevation raster attached to
+    #  each tile is a 3Wx3W "mosaic" texture (tile's own data centered in the middle third, 8
+    #  same-zoom neighbor tiles tiled around it, real GPU mipmaps enabled - see the Frozen
+    #  Interface Contract in that doc), scene.cpp enables neighbor prefetching + CPU-side mosaic
+    #  stitching for the elevation source, and all ELEVATION_MOSAIC-gated shader code (below and
+    #  in hillshade.yaml) compiles in. Default false = plain per-tile textures, classic Lambertian
+    #  hillshading, zero mosaic overhead. The app toggles this via SceneUpdate from the
+    #  "Texture shading" checkbox (see MapsApp::loadSceneFile).
+    elevation_mosaic: false
+    # 1 for node-registered elevation tiles (odd size, e.g. 257x257: outermost row/col is
+    #  shared with the adjacent tile - true of the arcgis source below), 0 for
+    #  pixel-registered (even, e.g. 256x256 terrarium) tiles. Must match the source, since
+    #  the mosaic drops the duplicated shared line per cell (cells are W - overlap wide) and
+    #  the shader's mosaic UV remap needs the tile's true sample count W.
+    elevation_tile_overlap: 1
+    # Native per-tile sample count MINUS elevation_tile_overlap (Wp0 in rasterSource.cpp's
+    #  comments) of a single, non-overzoomed elevation tile from the source below (257px node-
+    #  registered -> 256). Used by getTerrainMeshElevation() (below) to recover how many
+    #  overzoom-composite "tile widths" (N = effective-Wp / this) the currently bound elevation
+    #  raster actually spans, purely from its own pixel dimensions -- see that function's doc
+    #  comment for why deriving the lattice this way (instead of guessing it from this vector
+    #  tile's own styling/data zoom) is what makes the drape match the terrain tileset by
+    #  construction. Must match the source's tile pixel size exactly.
+    elevation_tile_pixels: 256
+
 sources:
     elevation:
         type: Raster
@@ -7,6 +33,10 @@ sources:
         url: https://elevation3d.arcgis.com/arcgis/rest/services/WorldElevation3D/Terrain3D/ImageServer/tile/{z}/{y}/{x}
         max_zoom: 16
         cache: elevation
+        # How eagerly hillshading/texture-shading drops to a coarser cached zoom while zooming
+        #  out (see TileSource::lodAreaBias's doc comment) - 1.0 is the previous default
+        #  behavior; live-adjustable via the resolution-retention GUI slider (MapsApp).
+        zoom_retention: 1.0
         # 2 years
         max_age: 63072000
         attribution: |
@@ -25,11 +55,55 @@ styles:
                 ELEVATION_FLOAT_TEX: true
                 # sampler2D default is lowp!
                 TANGRAM_RASTER_PRECISION: 'highp'
+                # see docs/texture-shading-plan.md Frozen Interface Contract - gates getElevationAtLod()
+                #  below (and all texture-shading code in hillshade.yaml). Compiles out entirely (no
+                #  crash, no silent degrade) when the elevation source isn't a mosaic texture.
+                ELEVATION_MOSAIC: global.elevation_mosaic
+                ELEVATION_TILE_OVERLAP: global.elevation_tile_overlap
+                ELEVATION_TILE_PIXELS: global.elevation_tile_pixels
             blocks:
                 global: |
                     #if defined(TANGRAM_FRAGMENT_SHADER) || defined(TANGRAM_VERTEX_RASTERS)
+                    #ifdef ELEVATION_MOSAIC
+                    // The bound elevation raster is a 3Wp x 3Wp neighbor mosaic (Wp = W minus the
+                    //  ELEVATION_TILE_OVERLAP shared line dropped per cell - see rasterSource.cpp)
+                    //  with the tile's own data in the middle third, so every tile-local UV must be
+                    //  remapped into the center cell. The tile's W samples at uv = (i + 0.5)/W land on
+                    //  mosaic texel Wp + i (contiguous global sample grid), giving the remap below.
+                    //  Missing this remap entirely was the root cause of the "kaleidoscope" artifact
+                    //  in the Phase 4 findings: normals/contours were computed over the whole mosaic.
+                    vec2 elevationMosaicUV(vec2 uv) {
+                        vec2 msize = rasterPixelSize(ELEVATION_INDEX);  // 3 * Wp
+                        vec2 Wp = msize / 3.0;
+                        return (uv * (Wp + float(ELEVATION_TILE_OVERLAP)) + Wp) / msize;
+                    }
+                    #endif
+                    vec4 sampleElevationTex(vec2 uv) {
+                    #ifdef ELEVATION_MOSAIC
+                        // Explicit LOD 0 because the mosaic carries real mipmaps (for
+                        //  getElevationAtLod below); implicit-LOD sampling would blur elevation reads
+                        //  under minification, changing normal/contour behavior vs. the plain texture.
+                        // Snap to the texel CENTER first: the mosaic is uploaded with LINEAR
+                        //  filtering (the mip chain getElevationAtLod needs), so unlike the
+                        //  nearest-filtered plain/composite textures a raw read here bilinearly
+                        //  BLENDS adjacent samples wherever the sample point isn't exactly a texel
+                        //  center. Elevation point-reads (terrain mesh nodes, the drape lattice in
+                        //  getTerrainMeshElevation, normal taps) must be exact sample values: the
+                        //  draped vector meshes and the terrain read DIFFERENT mosaic textures
+                        //  through different UV mappings, so their blend errors differ and the two
+                        //  surfaces disagree on every steep slope - the texture-shading-on flavor
+                        //  of the white-patch drape mismatch. Snapping reproduces the non-mosaic
+                        //  path's nearest-filter behavior exactly; getElevationAtLod below keeps
+                        //  its deliberate linear mip sampling.
+                        vec2 msize = rasterPixelSize(ELEVATION_INDEX);
+                        vec2 fuv = (floor(elevationMosaicUV(uv) * msize) + 0.5) / msize;
+                        return textureLod(u_rasters[ELEVATION_INDEX], fuv, 0.0);
+                    #else
+                        return texture2D(u_rasters[ELEVATION_INDEX], uv);
+                    #endif
+                    }
                     float getElevationAt(vec2 uv) {  // in meters  //TANGRAM_RASTER_PRECISION sampler2D tex,
-                        vec4 h = texture2D(u_rasters[ELEVATION_INDEX], uv);
+                        vec4 h = sampleElevationTex(uv);
                     #ifdef ELEVATION_FLOAT_TEX
                         return h.r;
                     #else
@@ -38,4 +112,121 @@ styles:
                     #endif
                     }
                     float getElevation() { return getElevationAt(currentRasterUV(ELEVATION_INDEX)); }
+                    // Evaluate the piecewise-linear terrain surface that the terrain-ground/hillshade
+                    //  meshes actually render (RasterStyle::build: 64x64 cells per elevation-source
+                    //  tile, fixed anti-diagonal split) at this vertex's tile-local position. Vector
+                    //  meshes draped with global.terrain_3d_mixin must sit exactly ON that surface:
+                    //  sampling the elevation texture directly at their own vertices builds a
+                    //  *different* piecewise-linear surface, which dips below / rises above the
+                    //  terrain mesh wherever the terrain curves within a lattice cell. Where it dips
+                    //  below, the opaque terrain-ground pokes through (flat background-colored
+                    //  patches); where it rises above, the translucent hillshade overlay fails the
+                    //  depth test behind it and the polygon renders unshaded (washed-out patches
+                    //  keeping the land-cover hue: gray rock -> near-white, forest -> pale green).
+                    //  Both modes blow up at grazing view angles (a meters-scale height gap occludes
+                    //  a huge screen-space area when the surface is seen edge-on) and on
+                    //  high-curvature alpine terrain - the long-standing "white patches"
+                    //  (docs/terrain-illumination-plan.md).
+                    float getTerrainMeshElevation(float minElev) {
+                        // Lattice cell count, derived from the BOUND TEXTURE'S OWN pixel
+                        //  dimensions rather than guessed from this vector tile's styling/data zoom
+                        //  (u_tile_origin.z/.w): the terrain tileset can render a MIX of zooms
+                        //  across a single (coarser) vector tile's footprint under a tilted camera
+                        //  (near sub-tiles at a finer zoom, far ones coarser -- the terrain picks a
+                        //  display zoom per elevation tile from live on-screen area, which varies
+                        //  WITHIN one vector tile's footprint), so a lattice zoom guessed from this
+                        //  tile's own single styling zoom can never be right everywhere. CPU-side
+                        //  stitching (RasterSource::buildOverzoomElevationMosaic,
+                        //  rasterSource.cpp) instead builds the attached raster at the FINEST zoom
+                        //  actually present in the footprint, triangle-PL-upsampling coarser
+                        //  regions so they reproduce the terrain's own coarser-tile surface exactly
+                        //  (docs/terrain-illumination-plan.md "triangle-PL upsampling") -- reading
+                        //  the lattice size back off that texture's actual dimensions here is what
+                        //  makes CPU-side stitching and the shader's own lattice agree BY
+                        //  CONSTRUCTION, instead of needing to separately guess and stay in sync.
+                        //
+                        //  effectiveWp is the bound texture's own per-tile sample count (Wp = W -
+                        //  ELEVATION_TILE_OVERLAP) expressed in "target-zoom tile widths": for a
+                        //  plain per-tile or overzoom-composite texture, that's its raw pixel width
+                        //  minus the overlap; for a texture-shading neighbor-ring mosaic
+                        //  (ELEVATION_MOSAIC), the mosaic is 3x that same per-tile width (own data
+                        //  in the center third -- see elevationMosaicUV above), so divide out the 3
+                        //  first. cells is then just how many native ELEVATION_TILE_PIXELS-wide
+                        //  tile-equivalents that spans, times the fixed 64-cell-per-tile lattice --
+                        //  BUT that's only true when the bound texture's footprint is aligned 1:1
+                        //  with THIS vector tile (exact-zoom match, or an overzoom composite built
+                        //  to span exactly this tile - both leave u_raster_offsets[idx].z == 1, see
+                        //  style.cpp's setupTileShaderUniforms). When the attachment fell back to a
+                        //  COARSER PARENT tile (missing-raster proxy pass, updateTileSet()), that
+                        //  scale drops to 1/2^dz - the parent's plain texture has the SAME pixel
+                        //  dimensions as any single-zoom tile (effectiveWp is oblivious to the zoom
+                        //  gap), but this vector tile only covers a 1/2^dz slice of its footprint,
+                        //  and RasterStyle draws the terrain surface as one FIXED 64x64 mesh per
+                        //  DISPLAYED tile regardless of which zoom its own raster attachment landed
+                        //  on (rasterStyle.cpp: resolution is a hardcoded constant, not derived from
+                        //  the bound texture) - so during a parent-fallback proxy, the real terrain
+                        //  lattice covering this tile is coarser than 64 cells too. Multiplying by
+                        //  u_raster_offsets[idx].z folds in exactly that correction (1 in the
+                        //  exact-match/composite case, 1/2^dz in the parent-fallback case). Missing
+                        //  this was a real bug: draped polygons kept subdividing at a full 64-cell
+                        //  lattice while genuinely proxying a coarser parent, so lattice corners
+                        //  landed at the WRONG fractional position within the parent texture and
+                        //  read badly wrong heights - triangular white spikes on cliff faces,
+                        //  worst while panning (exactly when proxy fallbacks are live) and at
+                        //  grazing angles (small height errors covering huge screen area edge-on),
+                        //  gone on a cold start at the same view (which settles on the real
+                        //  same-zoom/composite attachment before ever painting a frame).
+                    #ifdef ELEVATION_MOSAIC
+                        float effectiveWp = rasterPixelSize(ELEVATION_INDEX).x / 3.0;
+                    #else
+                        float effectiveWp = rasterPixelSize(ELEVATION_INDEX).x - float(ELEVATION_TILE_OVERLAP);
+                    #endif
+                        float cells = 64.0 * effectiveWp / float(ELEVATION_TILE_PIXELS)
+                                    * u_raster_offsets[ELEVATION_INDEX].z;
+                        vec2 st = clamp(v_modelpos_base_zoom.xy, 0.0, 1.0) * cells;
+                        vec2 cell = min(floor(st), cells - 1.0);
+                        vec2 f = st - cell;
+                        float d = 1.0 / cells;
+                        vec2 uv00 = cell * d;
+                        // clamp each node to minElev BEFORE interpolating, exactly as the terrain
+                        //  mesh clamps per-vertex (terrain-3d.yaml position block), so cells
+                        //  straddling the coastline interpolate the same clamped surface
+                        float h00 = max(getElevationAt(adjustRasterUV(ELEVATION_INDEX, uv00)), minElev);
+                        float h10 = max(getElevationAt(adjustRasterUV(ELEVATION_INDEX, uv00 + vec2(d, 0.0))), minElev);
+                        float h01 = max(getElevationAt(adjustRasterUV(ELEVATION_INDEX, uv00 + vec2(0.0, d))), minElev);
+                        float h11 = max(getElevationAt(adjustRasterUV(ELEVATION_INDEX, uv00 + vec2(d, d))), minElev);
+                        // same fixed anti-diagonal split as the terrain mesh (rasterStyle.cpp) and as
+                        //  full grid cells in buildPolygonGrid (builders.cpp), so a polygon grid at a
+                        //  power-of-two multiple of the lattice nests exactly inside these triangles
+                        return (f.x + f.y <= 1.0)
+                            ? h00 + f.x * (h10 - h00) + f.y * (h01 - h00)
+                            : h11 + (1.0 - f.x) * (h01 - h11) + (1.0 - f.y) * (h10 - h11);
+                    }
+                    #ifdef ELEVATION_MOSAIC
+                    // u_rasters[ELEVATION_INDEX] is assumed to be a 3Wp x 3Wp "mosaic" texture per the
+                    //  Frozen Interface Contract (docs/texture-shading-plan.md): tile's own data centered
+                    //  in the middle third, 8 same-zoom neighbor tiles tiled around it, uploaded with
+                    //  generateMipmaps=true / minFilter=LINEAR_MIPMAP_LINEAR. textureLod's hardware mip
+                    //  chain over this mosaic gives real (non-aliased) multi-scale low-pass elevation
+                    //  samples, used by textureShading() in hillshade.yaml to build a Laplacian pyramid.
+                    float getElevationAtLod(vec2 uv, float lod) {  // in meters; uv is tile-local [0,1]
+                        // Cap the blur footprint at ~one tile width: adjacent tiles' mosaics are built
+                        //  independently and share only 2 of their 3 cell columns/rows, so once a
+                        //  bilinear mip sample's footprint (~1.5 * 2^lod texels) reaches past the
+                        //  one-tile neighbor ring, the two tiles integrate over different data at the
+                        //  same world point and their shading disagrees -> visible tile seams (worst at
+                        //  low alpha, which weights the deepest bands most). Capping lod so the
+                        //  footprint stays within +/- Wp of any pixel of the center tile keeps every
+                        //  band consistent across the shared edge; deeper bands then difference to zero
+                        //  in textureShading()'s pyramid, smoothly fading out instead of seaming.
+                        //  log2(1.5) ~ 0.585; Wp = rasterPixelSize/3 (see elevationMosaicUV above).
+                        float maxLod = log2(rasterPixelSize(ELEVATION_INDEX).x / 3.0) - 0.585;
+                        vec4 h = textureLod(u_rasters[ELEVATION_INDEX], elevationMosaicUV(uv), min(lod, maxLod));
+                    #ifdef ELEVATION_FLOAT_TEX
+                        return h.r;
+                    #else
+                        return (h.r*256. + h.g + h.b/256.)*255. - 32768.;  // mapzen terrarium
+                    #endif
+                    }
+                    #endif
                     #endif

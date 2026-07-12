@@ -1,10 +1,12 @@
 #include <unistd.h>  // for symlink()
+#include <ctime>
 #include "ugui/svggui_platform.h"
 #include "ugui/svggui.h"
 #include "usvg/svgwriter.h"
 
 #include "mapsapp.h"
 #include "linuxPlatform.h"
+#include "debug/profiler.h"
 #include "util/yamlPath.h"
 #include "util/elevationManager.h"
 #include "util.h"
@@ -823,7 +825,11 @@ static void processX11Event(XEvent* xevent)
 static void screenshotPng(int width, int height)
 {
   Image img(width, height);
-  glReadBuffer(GL_FRONT);  // to get MSAA resolve ... in general reading front buffer not guaranteed to work
+  // read GL_BACK (before the swap) rather than GL_FRONT: under software/virtual-display rendering
+  //  (e.g. llvmpipe under Xvfb, used for automated/headless testing) reading GL_FRONT after
+  //  glXSwapBuffers reliably produced a blank image, matching the old comment below that front-buffer
+  //  reads aren't guaranteed to work; GL_BACK immediately before the swap is simpler and reliable.
+  glReadBuffer(GL_BACK);
   // GL_RGB, not GL_RGBA (alpha channel not allowed in screenshots)
   glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, img.pixels());
   glReadBuffer(GL_BACK);
@@ -1122,12 +1128,22 @@ int main(int argc, char* argv[])
       processX11Event(&xevent);
     } while(XPending(xDpy));
 
-    if(app->drawFrame(xContext.width, xContext.height))
-      glXSwapBuffers(xDpy, xWin);
+    bool didDraw = app->drawFrame(xContext.width, xContext.height);
 
+    // capture before the swap (screenshotPng now reads GL_BACK, not GL_FRONT - see its comment)
     if(takeScreenshot) {
       screenshotPng(xContext.width, xContext.height);
       takeScreenshot = false;
+    }
+
+    if(didDraw) {
+      glXSwapBuffers(xDpy, xWin);
+      if(Tangram::Profiler::isCapturing()) {
+        // scenario counters so the summarizer can segment frames by view state
+        Tangram::Profiler::counter("zoom", app->map->getZoom());
+        Tangram::Profiler::counter("pitchDeg", app->map->getTilt()*180/M_PI);
+      }
+      Tangram::Profiler::frameMark();
     }
     if(SvgGui::debugLayout) {
       FileStream strm("debug_layout.svg", "wb");

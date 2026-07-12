@@ -30,6 +30,10 @@ styles:
             blocks:
                 filter: |
                     #ifdef TANGRAM_TERRAIN_3D
+                    // Aerial perspective, part 1: color mix toward the atmosphere color with distance.
+                    //  Part 2 (shading-contrast attenuation with the same haze factor) lives in
+                    //  hillshade.yaml's color block, which duplicates this formula because the filter
+                    //  block runs after color - keep the two in sync (docs/terrain-illumination-plan.md).
                     // note v_position.z < 0
                     float cospitch = u_view[2][2];
                     float eyeh = -u_view[3][2];  // distance from eye to map center
@@ -55,7 +59,16 @@ styles:
                     // need sufficient offset for proxy levels to prevent terrain poking through level above
                     proxy *= 48.0;
                     #endif
+                    #ifdef TANGRAM_RASTER_STYLE
+                    // terrain-ground/hillshade mesh vertices ARE the terrain lattice nodes
+                    //  (RasterStyle::build), so a single sample suffices and defines the surface
                     float elev3d = max(getElevation(), TANGRAM_MIN_ELEVATION);
+                    #else
+                    // draped vector meshes must evaluate the terrain mesh's own piecewise-linear
+                    //  surface, NOT resample the raster at their own vertices - see
+                    //  getTerrainMeshElevation (elevation.yaml) for why ("white patches")
+                    float elev3d = getTerrainMeshElevation(float(TANGRAM_MIN_ELEVATION));
+                    #endif
                     position.z += float(TANGRAM_TERRAIN_SCALE) * elev3d;
                     v_world_position.z += elev3d;
                     #endif

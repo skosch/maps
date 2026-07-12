@@ -1,8 +1,10 @@
 #include "mapsapp.h"
 #include <unistd.h>
+#include <ctime>
 #include "ugui/svggui.h"
 #include "usvg/svgwriter.h"
 #include "../linux/src/linuxPlatform.h"
+#include "debug/profiler.h"
 #include "util/yamlPath.h"
 #include "util/elevationManager.h"
 #include "util.h"
@@ -267,8 +269,15 @@ int main(int argc, char* argv[])
     int fbWidth = 0, fbHeight = 0;
     glfwGetFramebufferSize(glfwWin, &fbWidth, &fbHeight);  //SDL_GL_GetDrawableSize((SDL_Window*)glfwWin, &fbWidth, &fbHeight);
 
-    if(app->drawFrame(fbWidth, fbHeight))
+    if(app->drawFrame(fbWidth, fbHeight)) {
       glfwSwapBuffers(glfwWin);
+      if(Tangram::Profiler::isCapturing()) {
+        // scenario counters so the summarizer can segment frames by view state
+        Tangram::Profiler::counter("zoom", app->map->getZoom());
+        Tangram::Profiler::counter("pitchDeg", app->map->getTilt()*180/M_PI);
+      }
+      Tangram::Profiler::frameMark();
+    }
 
     if(takeScreenshot) {
       screenshotPng(fbWidth, fbHeight);

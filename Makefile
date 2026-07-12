@@ -18,10 +18,12 @@ endif
 
 include make/shared.mk
 
-ifneq ($(DEBUG),0)
-  DEFS += LOG_LEVEL=3
-else
-  DEFS += LOG_LEVEL=2
+# LOG_LEVEL defaults to DEBUG's usual level but can be overridden independently, e.g.
+# `make DEBUG=1 LOG_LEVEL=2` for a debuggable (-O0/asserts-on) build without the LOGD
+# spam in hot paths (tile fetch/build/mosaic-stitch) that makes panning feel slow.
+LOG_LEVEL ?= $(if $(filter-out 0,$(DEBUG)),3,2)
+DEFS += LOG_LEVEL=$(LOG_LEVEL)
+ifeq ($(DEBUG),0)
   #DEFS += GLM_FORCE_INTRINSICS
 endif
 

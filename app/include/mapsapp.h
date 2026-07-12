@@ -150,6 +150,7 @@ public:
   Widget* createMapPanel(Toolbar* header, Widget* content, Widget* fixedContent = NULL, bool canMinimize = true);
   void addPlaceInfo(const char* icon, const char* title, const char* value);
   void dumpTileContents(float x, float y);
+  void toggleProfilerCapture();
   bool drawFrame(int fbWidth, int fbHeight);
   void setDpi(float dpi);
   Button* addUndeleteItem(const std::string& title, const SvgNode* icon, std::function<void()> callback);
@@ -180,6 +181,7 @@ public:
   Menu* undeleteMenu = NULL;
   Pager* panelPager = NULL;
   Button* terrain3dCb = NULL;
+  Button* textureShadingCb = NULL;
   Button* followGPSBtn = NULL;
   ProgressCircleWidget* progressWidget = NULL;
   std::function<bool(SvgGui*, Widget*, SDL_Event*)> pagerEventFilter;
@@ -226,6 +228,10 @@ public:
   static sqlite3* bkmkDB;
   static bool metricUnits;
   static bool terrain3D;
+  static bool textureShading;
+  // slew-limited auto-contrast factor for texture shading (see mapUpdate); persists across
+  //  scene reloads (the uniform itself resets to 1.0 with the scene)
+  float texShadingAutoContrast = 1.0f;
   static std::vector<Color> markerColors;
   static ThreadSafeQueue< std::function<void()> > taskQueue;
   static std::thread::id mainThreadId;

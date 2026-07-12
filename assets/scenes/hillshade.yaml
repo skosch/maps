@@ -48,6 +48,289 @@ application:
             step: 100
             min: -9000
             max: 9000
+        # Texture shading (docs/texture-shading-plan.md) - only has any visible effect when
+        #  ELEVATION_MOSAIC is enabled for the active elevation source (see elevation.yaml), i.e.
+        #  when the "Texture shading" checkbox is on. Balance against the normal hillshade via
+        #  "Hillshade Exaggeration" above (0 = texture shading only).
+        # Band-weight exponent (Brown's alpha, weight 2^(-k*alpha) for octave band k): lower =
+        #  broad landforms dominate, higher = fine detail dominates. The main slider is the
+        #  value at view zoom >= 13; "Zoomed Out" is the value at zoom <= 10.5 (interpolated
+        #  in between, so detail emphasis eases off as more terrain comes into view).
+        u_texture_shading_alpha:
+            style: hillshade
+            label: Texture Shading Alpha
+            min: 0
+            max: 3
+            step: 0.05
+        u_texture_shading_alpha_min:
+            style: hillshade
+            label: Texture Shading Alpha Zoomed Out
+            min: 0
+            max: 3
+            step: 0.05
+        u_texture_shading_contrast:
+            style: hillshade
+            label: Texture Shading Contrast
+            min: 0
+            max: 5
+            step: 0.05
+        # Overall strength of the texture-shading tint in the final composite.
+        u_texture_shading_opacity:
+            style: hillshade
+            label: Texture Shading Opacity
+            min: 0
+            max: 1
+            step: 0.05
+        # Tilted-view counterpart of the slider above (docs/terrain-lighting-v2-plan.md,
+        #  "Second revision: texture shading invisible at tilt"): the 2D whole-color ts
+        #  multiply/tint deliberately fades OUT at tilt (see ts_op in the color block), and
+        #  occ alone (the only other place texture shading reaches at tilt) is far too weak
+        #  to see. This ramps a whole-color ts multiply back IN as tilt increases, faded by
+        #  haze for aerial-perspective consistency with the rest of the tilted model.
+        u_texture_shading_opacity_3d:
+            style: hillshade
+            label: Texture Shading Opacity 3D
+            min: 0
+            max: 1
+            step: 0.05
+        # Number of octave bands summed (pyramid depth): more levels = larger landforms
+        #  contribute (each level doubles the coarsest feature size).
+        u_texture_shading_levels:
+            style: hillshade
+            label: Texture Shading Levels
+            min: 1
+            max: 8
+            step: 1
+        # Shift all bands coarser (+) or finer (-) by fractional octaves: raise to emphasize
+        #  prominent ridges/valleys and suppress fine texture noise.
+        u_texture_shading_scale:
+            style: hillshade
+            label: Texture Shading Scale
+            min: -1
+            max: 3
+            step: 0.25
+        # Compositing mode: 0 = gray tint mix (classic standalone texture-shading look),
+        #  1 = multiply (darkens valleys/brightens ridges over the existing hillshade,
+        #  preserving its 3D effect); values between blend the two.
+        u_texture_shading_blend:
+            style: hillshade
+            label: Texture Shading Blend
+            min: 0
+            max: 1
+            step: 0.05
+        # Unified tilt-parameterized terrain luminance (docs/terrain-lighting-v2-plan.md,
+        #  Phase 2): ONE illumination formula whose weights/exponents interpolate with camera
+        #  tilt (tilt_morph, computed in the normal block: 0 at zenith .. 1 by 45 deg), instead
+        #  of the old two-separate-layers-mixed-by-tilt architecture. At zenith every knob
+        #  below interpolates back to the fixed constants of the 2D cartographic look (0.7
+        #  ambient / 0.2 sky / 0.2 sun, no wrap, gamma 1, gain 4, alpha 0.25), so the zenith
+        #  render is unchanged regardless of these sliders; tilting blends toward these values,
+        #  retuned sun-dominant with an occlusion proxy (from the texture-shading pyramid,
+        #  SVF-like) on the sky term and an honest flat-ground normalization + tone shoulder
+        #  (replacing the old fixed-theoretical-max normalization that produced flat gray
+        #  mountain faces).
+        u_sky_weight:
+            style: hillshade
+            label: 3D Sky Light Weight
+            min: 0
+            max: 1
+            step: 0.05
+        u_sun_weight:
+            style: hillshade
+            label: 3D Sun Light Weight
+            min: 0
+            max: 1
+            step: 0.05
+        # ambient weight at full tilt (zenith ambient is fixed at 0.7 by the 2D parity
+        #  contract - see the unified luminance formula in the color block)
+        u_amb_weight_3d:
+            style: hillshade
+            label: 3D Ambient Weight
+            min: 0
+            max: 1
+            step: 0.05
+        # half-Lambert wrap on the sun term at full tilt: how far past the terminator the sun
+        #  still lights a back-facing slope (0 = hard Lambertian cutoff, the 2D/zenith value)
+        u_sun_wrap:
+            style: hillshade
+            label: Sun Wrap
+            min: 0
+            max: 1
+            step: 0.05
+        # sun falloff exponent at full tilt: >1 narrows the bright cone (more contrast between
+        #  sun-facing and grazing slopes), <1 broadens it (1 = the 2D/zenith value)
+        u_sun_gamma:
+            style: hillshade
+            label: Sun Gamma
+            min: 0.5
+            max: 3
+            step: 0.1
+        # sun world elevation angle, held fixed at every tilt (azimuth stays screen-anchored);
+        #  lower = more raking light = stronger modeling. 35.264 = the zenith/2D value
+        u_sun_elev:
+            style: hillshade
+            label: Sun Elevation (deg)
+            min: 15
+            max: 60
+            step: 1
+        # screen-space sun direction in the map plane, CCW from screen-right; 135 = upper-left
+        #  diagonal (the exact 2D value), 150 = "10 o'clock". Yaw-only: tilting never moves the
+        #  sun (see the normal block's "Third revision" comment)
+        u_sun_azimuth:
+            style: hillshade
+            label: Sun Screen Azimuth (deg)
+            min: 90
+            max: 180
+            step: 5
+        # lighting-normal exaggeration at full tilt (interpolates from Hillshade Exaggeration
+        #  at zenith): lower = more honest normals for geometry displayed at true scale
+        u_exaggerate_3d:
+            style: hillshade
+            label: 3D Lighting Exaggeration
+            min: 0.5
+            max: 4.5
+            step: 0.25
+        # amplitude of the texture-shading-derived occlusion (valleys darker, ridges brighter)
+        #  and the floor it clamps to (valley-floor darkness limit)
+        u_occ_strength:
+            style: hillshade
+            label: 3D Occlusion Strength
+            min: 0
+            max: 2
+            step: 0.05
+        u_occ_min:
+            style: hillshade
+            label: 3D Occlusion Min
+            min: 0
+            max: 1
+            step: 0.05
+        # ceiling on the occlusion multiplier (see occ in the color block) - was hardcoded at
+        #  1.15, which silently halved the ridge-brightening half of the signal (unclamped
+        #  ridge value reaches ~1.32 at strength 0.8); a slider lets it be widened
+        u_occ_max:
+            style: hillshade
+            label: 3D Occlusion Max
+            min: 1
+            max: 1.5
+            step: 0.05
+        # lets the occlusion proxy also darken the ambient term, not just the sky term
+        #  (ambient is sky light too - physically honest, and raises occ's modulated share
+        #  of the light from ~0.30*sky toward ~0.55+, see the plan's tilt-visibility revision)
+        u_occ_ambient:
+            style: hillshade
+            label: 3D Occlusion On Ambient
+            min: 0
+            max: 1
+            step: 0.05
+        # asymptote of the rational tone shoulder at full tilt (the old 2D shoulder's implicit
+        #  max, 0.95 + 1/3, interpolates toward this): keeps sun-facing steep slopes from
+        #  clipping to a featureless white blotch (the Dolomite/Alps "white patches" bug) while
+        #  approaching but never reaching pure white
+        u_shoulder_max:
+            style: hillshade
+            label: Tone Shoulder Max
+            min: 0.95
+            max: 1.35
+            step: 0.01
+        # hard ceiling on normalized luminance before the tone shoulder, at full tilt (the old
+        #  2D hard clamp to 1.0 interpolates toward this, giving the sun term headroom above
+        #  flat-ground-normalized 1.0 before the shoulder rolls it off)
+        u_lum_cap:
+            style: hillshade
+            label: Luminance Cap
+            min: 1
+            max: 3
+            step: 0.05
+        # overall strength of the unified shading layer: alpha of the translucent blend-over,
+        #  and contrast gain (rgb = gain*L - (gain-1), the same trick as the 2D 4*shading-3)
+        u_shade3d_alpha:
+            style: hillshade
+            label: 3D Shade Alpha
+            min: 0
+            max: 1
+            step: 0.05
+        u_shade3d_gain:
+            style: hillshade
+            label: 3D Shade Gain
+            min: 1
+            max: 8
+            step: 0.25
+        # aerial perspective: how much distance haze flattens shading contrast (the color fog
+        #  mix itself lives in terrain-3d.yaml's fog style)
+        u_haze_contrast:
+            style: hillshade
+            label: 3D Haze Contrast Atten
+            min: 0
+            max: 1
+            step: 0.05
+        # Warm/cool chromatic shading (docs/terrain-lighting-v2-plan.md Phase 3): sun-facing
+        #  surfaces drift warm, shadowed surfaces cool blue-violet, buying face separation
+        #  without more luminance contrast. 0 = today's exact gray. The tint colors
+        #  themselves (u_shade_cool/u_shade_warm) are plain vec3 uniforms, tuned in yaml -
+        #  gui_variables only handles scalars/colors, not arbitrary vec3s.
+        u_shade_warmth:
+            style: hillshade
+            label: 3D Shade Warmth
+            min: 0
+            max: 1
+            step: 0.05
+        # 2D counterpart - nonzero departs from the classic gray 2D look, so off by default
+        u_shade_warmth_2d:
+            style: hillshade
+            label: 2D Shade Warmth
+            min: 0
+            max: 1
+            step: 0.05
+        # Cast shadows (docs/terrain-lighting-v2-plan.md Phase 4): mip-accelerated horizon
+        #  march over the elevation mosaic toward the sun. Requires the "Texture Shading"
+        #  checkbox (ELEVATION_MOSAIC) to be on - the march reuses the same mosaic mip
+        #  pyramid textureShading() builds; with texture shading off the shadow sliders
+        #  below have no effect (the march is compiled out entirely).
+        u_shadow_strength:
+            style: hillshade
+            label: 3D Shadow Strength
+            min: 0
+            max: 1
+            step: 0.05
+        u_shadow_strength_2d:
+            style: hillshade
+            label: 2D Shadow Strength
+            min: 0
+            max: 1
+            step: 0.05
+        u_shadow_soft:
+            style: hillshade
+            label: Shadow Softness
+            min: 0.01
+            max: 0.5
+            step: 0.01
+        u_shadow_bias:
+            style: hillshade
+            label: Shadow Bias
+            min: 0
+            max: 0.05
+            step: 0.005
+        u_shadow_d0:
+            style: hillshade
+            label: Shadow Start (texels)
+            min: 0.5
+            max: 4
+            step: 0.25
+        # Phase 3/4 debugging (docs/terrain-lighting-v2-plan.md): cast shadows only multiply the
+        #  SUN term (games' "shadows on direct light only" rule) - but the sun is deliberately
+        #  backlit at every tilt (yaw-only screen-anchored azimuth, "Third revision"), so most
+        #  shadowed pixels already have a small `sun` value and multiplying it further by sunvis
+        #  changes little - cast shadows read weakly even when the march itself is correct. This
+        #  adds a second, DIRECT-LUMINANCE darkening (Imhof's "Schattenton"): a deliberately
+        #  non-physical graphic layer that darkens L itself wherever the shadow march fires,
+        #  legible under any sun geometry. 0 = off (today's sun-term-only behavior). Tilt-gated
+        #  and exact no-op at T=0 regardless of the 2D shadow-strength sliders above.
+        u_shadow_darken:
+            style: hillshade
+            label: Shadow Darken (direct)
+            min: 0
+            max: 1
+            step: 0.05
 
 
 styles:
@@ -68,6 +351,18 @@ styles:
                 color: |
                     base_color.rgb = mix(base_color.rgb, u_base_mix_color.rgb, u_base_mix_color.a);
 
+    # Opaque terrain-following ground plane, drawn below all map polygons (see layers.earth.ground).
+    # With 3D terrain this is the surface of the terrain itself (the hillshade style is now translucent
+    #  in 3D, blending shading over land cover polygons exactly as in 2D, so an opaque backdrop is
+    #  needed to keep mountains from being see-through); in 2D it's a single flat quad per tile
+    #  (RasterStyle uses a 1x1 grid without an ElevationManager) matching the scene background color,
+    #  so it is effectively free and can stay enabled in both modes.
+    terrain-ground:
+        base: raster
+        mix: [ global.terrain_3d_mixin, get-elevation ]
+        raster: custom
+        lighting: false
+
     hillshade:
         base: raster
         mix: [ global.terrain_3d_mixin, get-elevation ]
@@ -81,10 +376,143 @@ styles:
                 METRIC_UNITS: global.metric_units
                 SHOW_CONTOURS: global.show_contours
                 SHOW_HYPSOMETRIC: global.show_hypsometric
+                # Hard compile-time cap on the Laplacian-pyramid loop for texture shading; the
+                #  *effective* depth is the u_texture_shading_levels uniform (GUI slider), clamped to
+                #  this. A mip level k box-filters roughly a 2^k x 2^k texel footprint of the mosaic,
+                #  so deeper levels read well into the neighbor cells; that's fine now that (a)
+                #  neighbor cells are patched with real tile data as prefetched neighbors arrive
+                #  (RasterSource::patchNeighborMosaics - mirror-extrapolated cells are only a brief
+                #  transient), and (b) the historical "kaleidoscope" artifact turned out to be
+                #  getElevationAt() missing the mosaic UV remap (fixed in elevation.yaml), not deep
+                #  mip levels.
+                TEXTURE_SHADING_MAX_LEVELS: 8
+                # Cast-shadow march step count (docs/terrain-lighting-v2-plan.md Phase 4):
+                #  compile-time loop bound (GLSL ES 1.00 requires a constant bound), same
+                #  pattern as TEXTURE_SHADING_MAX_LEVELS above. Cost is ~12 textureLod taps
+                #  when shadows are enabled (u_shadow_strength/_2d > 0), skipped otherwise.
+                # Perf (2026-07-11 profiling): reduced from 16 - reach is d0 * growth^steps
+                #  (see `d *= growth` in the global block's sunShadow()), so this was reduced
+                #  together with that multiplier (1.45 -> ~1.64) to keep the SAME total shadow
+                #  reach at fewer, coarser steps - a naive step-count cut alone would silently
+                #  truncate how far shadows can cast instead of just coarsening their sampling.
+                TERRAIN_SHADOW_STEPS: 12
             uniforms:
                 u_exaggerate: 4.5
                 u_contour_color: global.contour_color
                 u_min_contour_elev: 0.0
+                # band-weight exponent at high zoom (>= z13) / low zoom (<= z10.5); interpolated
+                #  in between - see textureShading(). Low values emphasize broad landforms; 0.6
+                #  reads much better than the old 2.0 default (which buried landform structure
+                #  under fine texture noise) now that low-alpha tile seams are fixed by the
+                #  blur-footprint cap in getElevationAtLod (elevation.yaml)
+                u_texture_shading_alpha: 0.6
+                u_texture_shading_alpha_min: 0.5
+                # contrast multiplies a dimensionless slope-like value (see textureShading()), so
+                #  its useful range is O(1) at any zoom level
+                u_texture_shading_contrast: 1.0
+                # auto-contrast factor, set per-frame by the app (MapsApp::mapUpdate) from the
+                #  regional ruggedness statistic (RasterSource::aggregateRugosity) with slew
+                #  limiting - NOT a gui variable; the contrast slider above multiplies on top
+                u_texture_shading_auto: 1.0
+                u_texture_shading_opacity: 0.7
+                # tilted-view counterpart of the opacity above - ramps IN as tilt_morph fades
+                #  the 2D opacity OUT (see ts_op in the color block); default 0.5 restores a
+                #  visible whole-color texture-shading multiply at tilt
+                u_texture_shading_opacity_3d: 0.5
+                # Perf (2026-07-11 profiling): each level costs one dependent getElevationAtLod
+                #  fetch in textureShading() below, unconditionally on every hillshade fragment at
+                #  every tilt (not tilt-gated like the shadow march). Reduced from 6 - drops the
+                #  coarsest (broadest-landform) octaves first, which contribute the least visible
+                #  detail per fetch; 4 read too flat, settled on 5.
+                u_texture_shading_levels: 5
+                u_texture_shading_scale: 1.25
+                u_texture_shading_blend: 1.0
+                # Unified tilt-parameterized terrain luminance knobs (docs/terrain-lighting-v2-
+                #  plan.md Phase 2; see the color block's HILLSHADE_BLEND_OVER branch): these are
+                #  the values the model interpolates TOWARD as tilt_morph -> 1 (full 45 deg
+                #  tilt); at zenith (tilt_morph == 0) the formula always uses the fixed 2D
+                #  constants instead, so these only affect tilted 3D views regardless of setting.
+                # sky (ambient-lit, azimuth-free) vs. screen-anchored-sun balance
+                u_sky_weight: 0.30
+                u_sun_weight: 0.45
+                # ambient weight at full tilt (zenith ambient is fixed at 0.7)
+                u_amb_weight_3d: 0.25
+                # half-Lambert wrap and falloff exponent on the sun term at full tilt
+                u_sun_wrap: 0.2
+                u_sun_gamma: 1.2
+                # sun WORLD elevation angle in degrees, held fixed at every tilt (azimuth stays
+                #  screen-anchored upper-left). 35.264 = asin(1/sqrt(3)) = the zenith 2D value,
+                #  so tilt 0 is an exact no-op (parity contract); without this, tilting raised
+                #  the sun to ~50-55 deg and killed the raking light (see the normal block)
+                u_sun_elev: 35.264
+                # sun's SCREEN-space azimuth in the map plane, CCW from screen-right; 135 = upper-
+                #  left diagonal, yaw-only (tilt/pitch never moves the sun - normal block, "Third
+                #  revision"). Default matches the zenith value exactly (parity contract).
+                u_sun_azimuth: 135.0
+                # lighting-normal exaggeration at full tilt (interpolates from u_exaggerate at
+                #  zenith - see hscale in the normal block; 4.5x normals on 1x geometry saturate
+                #  the sky term and flatten tilted views)
+                u_exaggerate_3d: 2.0
+                # SVF-style occlusion proxy from the texture-shading pyramid: amplitude and
+                #  valley-floor clamp (multiplies the sky term only; lives on at all tilts)
+                u_occ_strength: 0.8
+                u_occ_min: 0.55
+                # occ ceiling - was hardcoded 1.15 (see u_occ_max slider comment above)
+                u_occ_max: 1.25
+                # let occ also modulate the ambient term (0 = old behavior, sky term only)
+                u_occ_ambient: 0.5
+                # tone pipeline at full tilt: hard luminance ceiling before the shoulder, and the
+                #  shoulder's own asymptote (replaces the old fixed-theoretical-max normalization
+                #  that flattened mountain faces to gray - see F5 in the plan)
+                u_lum_cap: 2.0
+                u_shoulder_max: 1.0
+                # translucent blend-over strength/gain of the unified layer (2D uses 0.25 / 4.0).
+                # THE GAIN IS A COMPOSITING WINDOW, NOT A CONTRAST KNOB (Phase 2 revision, see
+                #  docs/terrain-lighting-v2-plan.md "Revision after first user test"): rgb =
+                #  gain*L - (gain-1) maps only L in [1 - 1/gain, 1] onto visible grays; everything
+                #  below that floor clamps to identical black. The 2D look's gain 4 works because
+                #  its formula has a 0.7 ambient floor - L lives in [0.7, 1.1] by construction,
+                #  matching the [0.75, 1] window. The tilted model's honest L spans ~[0.3, 1.2],
+                #  so gain must stay near 1.4 (window floor ~0.29) or every shadowed mountain
+                #  face crushes to the same black - THE primary "flat gray at tilt" mechanism
+                #  (it flattened the pre-Phase-2 sky-dominant model identically). The wider
+                #  window carries less punch per unit alpha, so alpha rises to compensate.
+                u_shade3d_alpha: 0.55
+                u_shade3d_gain: 1.4
+                # aerial perspective: fraction of shading contrast removed at full haze
+                u_haze_contrast: 0.6
+                # Warm/cool chromatic shading (docs/terrain-lighting-v2-plan.md Phase 3):
+                #  multiplier tints around 1.0 for the sun-facing / shadowed extremes, and
+                #  the strength that blends toward them (T=1 default vs. 2D default 0 - see
+                #  the color block for the mix and the gui_variables comment above).
+                # Phase 3/4 debugging note: the tint stack multiplies out to only ~1-4/255 of
+                #  actual chroma on screen once the alpha-compositing bottleneck (overlay rgb
+                #  ~0.7 range x alpha 0.55 x this deviation x warmth) is accounted for - the
+                #  warm/cool split was effectively invisible at the original deviations, even
+                #  though the shader logic itself was correct. Deviations doubled from
+                #  (0.88/0.94/1.10, 1.10/1.03/0.88) and u_shade_warmth raised 0.5 -> 1.0 to
+                #  compensate; still nowhere near clipping (tint * gain*L stays well inside
+                #  [0,~1.3] over realistic L).
+                u_shade_cool: [0.78, 0.88, 1.24]
+                u_shade_warm: [1.24, 1.06, 0.78]
+                u_shade_warmth: 1.0
+                u_shade_warmth_2d: 0.0
+                # Cast shadows (docs/terrain-lighting-v2-plan.md Phase 4): strength
+                #  interpolates 2D -> 3D like the rest of the model (default 0 in 2D, no
+                #  cast shadows at zenith, matching swisstopo practice); soft/bias/d0 tune
+                #  the horizon-march penumbra width, self-shadow-acne guard, and march start
+                #  distance respectively (see sunShadow() in the global block).
+                u_shadow_strength: 0.6
+                u_shadow_strength_2d: 0.0
+                u_shadow_soft: 0.15
+                u_shadow_bias: 0.01
+                u_shadow_d0: 1.5
+                # Phase 3/4 debugging (docs/terrain-lighting-v2-plan.md): direct-luminance
+                #  "Schattenton" shadow darkening, alongside (not instead of) the sun-term
+                #  multiply above - see shadow_amt/the L *= mix(...) in the color block. 0.25
+                #  makes cast shadows legible even under the deliberately backlit sun geometry
+                #  where the sun-term-only path alone reads weak.
+                u_shadow_darken: 0.25
                 # https://github.com/der-stefan/OpenTopoMap/blob/master/mapnik/relief_color_text_file.txt
                 # - stop offset in meters/10000
                 u_terrain_color: |
@@ -114,10 +542,118 @@ styles:
                       discard;  //color = vec4(uv.x, uv.y, 0.0, 1.0);
 
             blocks:
+                global: |
+                    // Fragment-only: getElevationAtLod (elevation.yaml) is itself gated to fragment/
+                    //  vertex-rasters stages, and TANGRAM_VERTEX_RASTERS is false for plain 2D hillshade,
+                    //  so without this guard textureShading() would leak into the vertex shader (where
+                    //  polygon.vs also has a `#pragma tangram: global` insertion point) and fail to link
+                    //  (getElevationAtLod undefined there) even though it's only ever called from the
+                    //  fragment-only "color" block below.
+                    #if defined(ELEVATION_MOSAIC) && defined(TANGRAM_FRAGMENT_SHADER)
+                    // Live, per-tile approximation of Leland Brown's texture shading (a scale-invariant,
+                    //  fractional-Laplacian high-pass filter over elevation - see
+                    //  docs/texture-shading-plan.md for background and the Frozen Interface Contract this
+                    //  must match). Brown's own algorithm is a global offline FFT/DCT operation; here we
+                    //  approximate it live by building a Laplacian/octave pyramid out of the real GPU
+                    //  mipmap chain of the mosaic elevation texture (getElevationAtLod, elevation.yaml):
+                    //  each octave band k is the bandpass difference between adjacent mip levels, weighted
+                    //  by the geometrically-correct discretization 2^(-k*alpha) of Brown's |freq|^alpha
+                    //  power-law filter, then squashed through Brown's closed-form contrast curve.
+                    // Forward-declared: defined in elevation.yaml's get-elevation style (mixed into this
+                    //  style). Block-merge order across mixed styles isn't guaranteed, so declare the
+                    //  prototype here rather than rely on getElevationAtLod's definition coming first.
+                    float getElevationAtLod(vec2 uv, float lod);
+                    float textureShading(vec2 uv, float texelMeters) {
+                        // anchor the pyramid to *continuous* view zoom, not the integer tile zoom:
+                        //  the fractional base lod b rises 0 -> 1 as the view zooms in across one tile
+                        //  zoom level (keeping each band's screen-space scale constant, via textureLod's
+                        //  trilinear filtering), and drops back by exactly 1 when tiles swap to the next
+                        //  zoom (u_tile_origin.w increments), so band k of the new tiles samples the
+                        //  same physical scale band k+1 did a moment earlier - no jump in the shading at
+                        //  tile-zoom transitions, and overzoomed tiles (tile zoom capped at the source's
+                        //  max_zoom) degrade smoothly too.
+                        // u_texture_shading_scale shifts the whole band range by (fractional) octaves:
+                        //  positive = coarser (emphasize broad ridge/valley landforms, suppress fine
+                        //  noise), negative = finer.
+                        float b = max(0.0, u_map_position.z - u_tile_origin.w) + u_texture_shading_scale;
+                        // zoom-dependent band-weight exponent: u_texture_shading_alpha applies fully
+                        //  at view zoom >= 13 (fine ridge/gully detail dominates), easing down to
+                        //  u_texture_shading_alpha_min at zoom <= 10.5 (broad landforms dominate when
+                        //  a whole range is in view); linear in continuous zoom, so no visible steps
+                        float ts_a = mix(u_texture_shading_alpha_min, u_texture_shading_alpha,
+                                         clamp((u_map_position.z - 10.5) / 2.5, 0.0, 1.0));
+                        float z = 0.0;
+                        float h_prev = getElevationAtLod(uv, b);
+                        for (int k = 0; k < TEXTURE_SHADING_MAX_LEVELS; k++) {
+                            if (float(k) >= u_texture_shading_levels) { break; }
+                            float h_next = getElevationAtLod(uv, b + float(k + 1));
+                            // band k = LoD_k - LoD_(k+1), i.e. what mip level k+1's blur removes from level k
+                            z += (h_prev - h_next) * pow(2.0, -float(k) * ts_a);
+                            h_prev = h_next;
+                        }
+                        // normalize the band sum (meters) by the ground size of the base band's sampling
+                        //  scale (texel spacing * 2^b, also continuous across tile-zoom swaps) to make it
+                        //  a dimensionless, slope-like quantity, so u_texture_shading_contrast behaves
+                        //  comparably at any zoom instead of multiplying raw meters (whose magnitude per
+                        //  band scales with the ground size of a texel)
+                        float az = u_texture_shading_contrast * u_texture_shading_auto * z / (texelMeters * exp2(b));
+                        return az / (2.0*sqrt(1.0 + az*az)) + 0.5;
+                    }
+                    // Cast-shadow test: march from this fragment toward the sun over the elevation mosaic's
+                    //  mip pyramid, tracking the max horizon tangent; if the horizon rises above the sun's
+                    //  elevation, the fragment is shadowed. Soft comparison = penumbra; lod grows with
+                    //  distance (cheap cone-tracing + denoise). Reach is capped at the mosaic's neighbor
+                    //  ring (~1 tile width; docs/terrain-lighting-v2-plan.md Phase 4 pitfalls) with a fade
+                    //  so truncated long shadows end gently instead of seaming at tile borders.
+                    // uv: tile-local fragment position; s_world: unit sun vector (world, z up);
+                    // h0: fragment elevation (true meters); texwh: texels per tile (mosaic-corrected);
+                    // dxy_elev: projected meters per texel; coslat: true meters = projected * coslat.
+                    float sunShadow(vec2 uv, vec3 s_world, float h0, vec2 texwh, vec2 dxy_elev, float coslat) {
+                        vec2 sdir = s_world.xy / max(length(s_world.xy), 1e-4);   // horizontal sun dir (world)
+                        // tile-local uv per projected meter, per axis (uv v-axis == world north: verified via
+                        //  the normal block's gradient convention - see the plan doc Phase 4 results note)
+                        vec2 sdir_uv = sdir / (dxy_elev * texwh);
+                        float tanSun = s_world.z / max(length(s_world.xy), 1e-4);
+                        // march reach: keep uv + sdir_uv*d inside [-0.95, 1.95] on both axes
+                        vec2 dmax2 = vec2(1e9);
+                        if (sdir_uv.x > 1e-9) { dmax2.x = (1.95 - uv.x) / sdir_uv.x; }
+                        else if (sdir_uv.x < -1e-9) { dmax2.x = (-0.95 - uv.x) / sdir_uv.x; }
+                        if (sdir_uv.y > 1e-9) { dmax2.y = (1.95 - uv.y) / sdir_uv.y; }
+                        else if (sdir_uv.y < -1e-9) { dmax2.y = (-0.95 - uv.y) / sdir_uv.y; }
+                        float dmax = min(dmax2.x, dmax2.y);
+                        float d = u_shadow_d0 * dxy_elev.x;                        // start ~1.5 texels out
+                        float sh = 0.0;
+                        for (int i = 0; i < TERRAIN_SHADOW_STEPS; i++) {
+                            if (d > dmax) { break; }
+                            float lod = max(log2(d / dxy_elev.x) - 2.0, 0.0);      // getElevationAtLod caps internally
+                            float h = getElevationAtLod(uv + sdir_uv * d, lod);
+                            // horizon tangent in true-meter space; u_shadow_bias tilts the ray up slightly to
+                            //  prevent self-shadow acne from mip-blurred near samples
+                            float tanH = (h - h0) / (d * coslat) - u_shadow_bias;
+                            float s_i = clamp((tanH - tanSun) / max(u_shadow_soft, 1e-3), 0.0, 1.0);
+                            // fade shadow found near the reach cap (adjacent tiles' mosaics disagree there)
+                            s_i *= 1.0 - smoothstep(0.7, 1.0, d / dmax);
+                            sh = max(sh, s_i);
+                            // Perf (2026-07-11): growth raised 1.45 -> 1.64 alongside
+                            //  TERRAIN_SHADOW_STEPS 16 -> 12 above, so d0 * growth^steps (the
+                            //  march's total reach) stays the same - coarser intermediate
+                            //  sampling, same maximum shadow-casting distance.
+                            d *= 1.64;
+                        }
+                        return sh;   // 0 = fully sunlit, 1 = fully shadowed
+                    }
+                    #endif
                 normal: |
                     // Using 9 texel patch, estimate 1st and 2nd deriv to smooth elevation and normal
                     vec2 st = currentRasterUV(ELEVATION_INDEX);
                     vec2 texwh = rasterPixelSize(ELEVATION_INDEX);
+                    #ifdef ELEVATION_MOSAIC
+                    // rasterPixelSize reports the full 3Wp x 3Wp mosaic (Wp = W - overlap, the shared
+                    //  line dropped per cell - see elevation.yaml); all the tile-local texel math below
+                    //  (texel centers, finite-difference offsets, meters-per-texel) wants the tile's
+                    //  own sample count W. getElevationAt() itself does the mosaic UV remap.
+                    texwh = texwh / 3.0 + float(ELEVATION_TILE_OVERLAP);
+                    #endif
                     vec2 duv = 1./texwh;
                     vec2 ij = st * texwh;
                     // this fixes seams on raster tiles, but adds seams in polygons!
@@ -134,13 +670,16 @@ styles:
                     float h20 = getElevationAt(uv + vec2(duv.x, -duv.y));
                     float h21 = getElevationAt(uv + vec2(duv.x, 0.));
                     float h22 = getElevationAt(uv + duv);
-                    // handle edge of tile by extrapolating
+                    #ifndef ELEVATION_MOSAIC
+                    // handle edge of tile by extrapolating (with a mosaic, real neighbor-tile data
+                    //  exists beyond the tile edge, so the out-of-range samples above are valid)
                     bvec2 bot = lessThan(cen_ij, vec2(1.));
                     bvec2 top = greaterThan(cen_ij + 1., texwh);
                     if(bot.x) { h00 = 2.*h10 - h20; h01 = 2.*h11 - h21; h02 = 2.*h12 - h22; }
                     if(top.x) { h20 = 2.*h10 - h00; h21 = 2.*h11 - h01; h22 = 2.*h12 - h02; }
                     if(bot.y) { h00 = 2.*h01 - h02; h10 = 2.*h11 - h12; h20 = 2.*h21 - h22; }
                     if(top.y) { h02 = 2.*h01 - h00; h12 = 2.*h11 - h10; h22 = 2.*h21 - h20; }
+                    #endif
                     // proj meters per elevation tile pixel; note u_tile_origin.w is tile data zoom,
                     //  u_tile_origin.z is tile styling zoom, u_map_position.z is view zoom (float)
                     vec2 dxy_elev = 2.*3.141592*6378137.0*exp2(-u_tile_origin.w)*duv/u_raster_offsets[ELEVATION_INDEX].z;
@@ -157,21 +696,91 @@ styles:
                     vec2 grad0 = vec2(h21 - h01, h12 - h10)/2.0;
                     vec2 grad = (grad0 + curv*f)/dxy_elev;
                     float elev = h11 + dot(f, grad0) + 0.5*dot(f, curv*f);  // 2nd order does help a bit w/ contour lines
+                    // With 3D terrain, illumination MORPHS with camera tilt (docs/terrain-lighting-v2-
+                    //  plan.md Phase 2): tilt_morph is 0 at zenith (the unified formula in the color
+                    //  block then reduces algebraically to exactly the Phase-1 2D cartographic look)
+                    //  and reaches 1 by 45 deg tilt. Computed here, ahead of the normal computation,
+                    //  so the lighting exaggeration below can interpolate with it; the guard uses
+                    //  !ELEVATION_INDEX instead of HILLSHADE_BLEND_OVER (only #defined further down,
+                    //  inside the ELEVATION_INDEX split) - the two are equivalent by construction.
+                    //  u_view[2][2] = cos(camera pitch), cf. fog in terrain-3d.yaml.
+                    #if defined(TANGRAM_TERRAIN_3D) && !ELEVATION_INDEX
+                    float tilt_morph = smoothstep(0.0, radians(45.0), acos(clamp(u_view[2][2], 0.0, 1.0)));
+                    #else
+                    const float tilt_morph = 0.0;
+                    #endif
                     // no underwater terrain for now
-                    float hscale = elev > 0. ? u_exaggerate : 0.;  // /pow(u_meters_per_pixel, 0.7)/65536.;
+                    // (in texture-shading mode the Lambertian relief stays active too - its strength
+                    //  is the existing u_exaggerate slider, texture shading blends over it in the
+                    //  color block, so the two can be balanced against each other from the GUI)
+                    // Lighting exaggeration interpolates DOWN with tilt (Phase 2 revision, see
+                    //  docs/terrain-lighting-v2-plan.md "Revision after first user test"): the zenith
+                    //  look wants strongly exaggerated normals (relief as a graphic hint), but at
+                    //  oblique tilts the same 4.5x pushes every real mountain slope's normal
+                    //  near-horizontal (n.z ~ 0.1-0.4) - the sky term saturates to a constant and the
+                    //  1x-displayed geometry is lit as if 4.5x steeper, one of the "everything
+                    //  flattens when tilted" mechanisms.
+                    float hscale = elev > 0. ? mix(u_exaggerate, u_exaggerate_3d, tilt_morph) : 0.;  // /pow(u_meters_per_pixel, 0.7)/65536.;
                     normal = normalize(vec3(-hscale*grad/coslat, 1.));
                     // slope from gradient calculated above
                     float slope = length(grad);
                     float slope_degs = atan(slope/coslat)*180.0/3.141592;
                     // setup base color - this could be moved to setup block
                     vec4 contour_color = u_contour_color;
+                    // Screen-anchored sun, ONE definition used at every tilt (docs/terrain-lighting-
+                    //  v2-plan.md Phase 2). Original bug (see the plan's F1): with light origin
+                    //  `camera` (the yaml default) tangram leaves light2's direction untransformed, so
+                    //  a vector meant to read as "upper-left of the screen" was actually interpreted in
+                    //  WORLD space - fixed NW in the world, rotating with the terrain instead of the
+                    //  screen. Phase 1/2 fixed that by rotating a camera-space vector to world via the
+                    //  FULL camera rotation (s_world = s_cam * mat3(u_view)).
+                    //
+                    // Third revision (2026-07-11, YAW-ONLY screen anchoring): rotating by the full
+                    //  camera rotation re-introduced a related problem - camera PITCH (tilt) also
+                    //  rotates s_world, so the sun's world azimuth drifted (~65 deg across the tilt
+                    //  range: NW at zenith -> W at 45 deg -> WSW at 60 deg), continuously relighting the
+                    //  terrain while tilting (reported as a "weirdly lustrous texture"). Fix: anchor the
+                    //  sun's azimuth to the map's YAW only (screen-up-in-the-map-plane), never to pitch,
+                    //  so tilting the camera never moves the sun and shading polarity at every tilt is
+                    //  identical to the 2D zenith polarity - a deliberate backlit-continuity choice
+                    //  (facing north, the predominantly-shaded sides are the south-facing ones, matching
+                    //  the 2D look, rather than "correct" world illumination). u_sun_azimuth (default
+                    //  135 deg) is the sun's SCREEN-space azimuth in the map plane, measured CCW from
+                    //  screen-right; 135 deg is the upper-left diagonal, chosen to be bit-identical to
+                    //  the old normalize(-1,1,1) direction at zenith (parity, verified below).
+                    //
+                    // camera-right in world coords = row 0 of the view rotation (u_view is world->camera;
+                    //  its rows are the camera basis vectors in world space). Under pure yaw+pitch (the map
+                    //  never rolls) camera-right stays horizontal, so its xy IS the yaw - pitch cannot leak in.
+                    vec3 cam_right = vec3(u_view[0][0], u_view[1][0], u_view[2][0]);
+                    vec2 e = cam_right.xy / max(length(cam_right.xy), 1e-4);  // map-plane screen-right
+                    vec2 h = vec2(-e.y, e.x);                                 // map-plane screen-up (90 deg CCW)
+                    float s_az = radians(u_sun_azimuth);
+                    float s_elev = radians(u_sun_elev);
+                    vec2 az_dir = cos(s_az) * e + sin(s_az) * h;              // sun azimuth in the map plane
+                    vec3 s_world = vec3(az_dir * cos(s_elev), sin(s_elev));
+                    // Zenith parity (exact by construction): at north-up zenith, cam_right = world
+                    //  east = (1,0,0), so e=(1,0), h=(0,1). With s_az=135 deg, az_dir=(cos135,sin135)=
+                    //  (-0.70711,0.70711). With s_elev=35.264 deg (asin(1/sqrt(3))), cos(s_elev)=
+                    //  sqrt(2/3)=0.81650, sin(s_elev)=sqrt(1/3)=0.57735. s_world = (az_dir*0.81650,
+                    //  0.57735) = (-0.57735, 0.57735, 0.57735) = normalize(-1,1,1) exactly - bit-
+                    //  identical to the old T=0 output.
+                    // Computed here, before the ELEVATION_INDEX split, so raw2d/s_world are in scope for
+                    //  both the blend-over branch immediately below and the raster-basemap branch in the
+                    //  color block (normal block runs before color block in the same fragment shader),
+                    //  and for the unified illumination model in the color block's HILLSHADE_BLEND_OVER
+                    //  branch (Phase 2).
+                    float raw2d = 0.7 + 0.2*clamp(normal.z, 0.0, 1.0)
+                                      + 0.2*clamp(dot(normal, s_world), 0.0, 1.0);
                     #if ELEVATION_INDEX
                     vec4 base_color = sampleRaster(0);
-                    #elif defined(TANGRAM_TERRAIN_3D)
-                    vec4 base_color = vec4(0.88, 0.88, 0.88, 1.0);
                     #else
+                    // Standalone hillshade over a vector base map: translucent shading blended over the
+                    //  polygons below, in 3D exactly as in 2D (the opaque terrain surface behind the
+                    //  polygons is provided by the terrain-ground style / layers.earth draw rule, so
+                    //  land cover coloring stays visible in both modes).
                     #define HILLSHADE_BLEND_OVER
-                    vec4 shading = calculateLighting(v_position.xyz, normal, vec4(1.0));
+                    vec4 shading = vec4(vec3(clamp(raw2d, 0.0, 1.0)), 1.0);
                     vec4 base_color = vec4(0.0, 0.0, 0.0, 0.0);  //v_color;
                     contour_color = shading*contour_color;
                     #endif
@@ -223,14 +832,225 @@ styles:
                         base_color = mix(base_color, contour_color, min(cov, 1.));
                     }
                     #endif
+                    // Texture-shading occlusion proxy (docs/texture-shading-plan.md): computed here,
+                    //  ahead of the illumination model below, because it feeds `occ` there (ridges see
+                    //  more sky, canyons less - a cheap sky-view-factor substitute) as well as the
+                    //  screen-space tint/multiply compositing further down.
+                    //  ts_shade: 0.5 = neutral, < 0.5 valleys/canyons, > 0.5 ridges.
+                    #ifdef ELEVATION_MOSAIC
+                    // dxy_elev/coslat = true meters per elevation texel (from the normal block above)
+                    float ts_shade = textureShading(currentRasterUV(ELEVATION_INDEX), 0.5*(dxy_elev.x + dxy_elev.y)/coslat);
+                    #endif
                     // apply lighting to get final color
                     #ifdef HILLSHADE_BLEND_OVER
-                    // for blending over background and opaque polygons; scale by 1/(1-light_accumulator_ambient) instead?
-                    color = vec4(4.0*shading.rgb - 3.0, 0.25);
+                    // Unified, tilt-parameterized terrain illumination (docs/terrain-lighting-v2-
+                    //  plan.md Phase 2): ONE luminance formula whose weights/exponents interpolate
+                    //  with tilt_morph (normal block; 0 at zenith .. 1 by 45 deg tilt), replacing the
+                    //  old two-separate-layers-mixed-by-tilt_morph architecture. At tilt_morph == 0
+                    //  every mix() below collapses to its first (2D) argument, and the whole block
+                    //  reduces ALGEBRAICALLY to the exact Phase-1 2D formula (raw2d, normal block) -
+                    //  see the plan's "Tone pipeline - RESOLVED" section for the term-by-term proof.
+                    //  Tilting blends toward a retuned, sun-dominant model with honest flat-ground
+                    //  normalization and a real tone shoulder, replacing the old fixed-theoretical-max
+                    //  normalization that flattened mountain faces to gray (F5 in the plan).
+                    //
+                    // Aerial perspective: distance haze (same formula as the fog in terrain-3d.yaml,
+                    //  computed here because the fog filter block runs after color) attenuates shading
+                    //  contrast per-fragment, layering near-crisp / far-flat depth. Meaningful only
+                    //  with 3D terrain (perspective depth via v_position/u_view); 0 without it.
+                    // note v_position.z < 0; u_view[3][2] = -(distance from eye to map center).
+                    //  The 8x density makes shading contrast fall off much faster than the color fog:
+                    //  with the default u_fog_density (0.1) the color fog only reaches ~0.1-0.2 at the
+                    //  most distant terrain, which is right for color but imperceptible as a contrast
+                    //  change - and aerial perspective flattens contrast well before it whitens hues
+                    //  (Imhof's luftperspektive; measured on the Howe Sound 60-deg test view).
+                    #ifdef TANGRAM_TERRAIN_3D
+                    float haze = 1.0 - clamp(exp(8.0 * u_fog_density * v_position.z/(-u_view[3][2])/(u_view[2][2] + 0.5)), 0.0, 1.0);
+                    #else
+                    const float haze = 0.0;
+                    #endif
+                    // Occlusion proxy multiplies the sky term only (games' "AO on ambient, never on
+                    //  direct" rule); left live at all tilts - the mix(1.0, occ, tilt_morph) below on
+                    //  the sky term fades its EFFECT to a no-op at T=0, not this computation itself.
+                    #ifdef ELEVATION_MOSAIC
+                    // ceiling was hardcoded at 1.15, silently halving the ridge-brightening half
+                    //  of the signal (unclamped ridge value reaches ~1.32 at strength 0.8); now a
+                    //  slider (u_occ_max, docs/terrain-lighting-v2-plan.md tilt-visibility revision)
+                    float occ = clamp(1.0 + u_occ_strength * (2.0*ts_shade - 1.0), u_occ_min, u_occ_max);
+                    occ = mix(occ, 1.0, u_haze_contrast * haze);
+                    #else
+                    const float occ = 1.0;
+                    #endif
+                    // sky: azimuth-free ambient term, plain n.z - deliberately NOT the old CIE-overcast
+                    //  (1 + 2*n.z)/3 form: with a separate ambient weight (w_amb) the two span the same
+                    //  affine family (CIE = 1/3 + 2/3*n.z is just ambient+slope), and plain n.z is what
+                    //  makes the T=0 reduction to raw2d's 0.2*clamp(normal.z,0,1) term exact.
+                    float sky = clamp(normal.z, 0.0, 1.0);
+                    // sun: half-Lambert wrap + gamma, both interpolated from "off" (wrap 0, gamma 1 -
+                    //  a hard Lambertian clamp(dot,0,1), exactly raw2d's sun term) at T=0 to the tilted-
+                    //  view tuning at T=1. s_world (normal block) is the single screen-anchored sun
+                    //  vector, world-elevation-clamped, shared with raw2d. sunvis (below) is the Phase 4
+                    //  cast-shadow visibility factor.
+                    float wrap = mix(0.0, u_sun_wrap, tilt_morph);
+                    float sun = pow(clamp((dot(normal, s_world) + wrap) / (1.0 + wrap), 0.0, 1.0),
+                                    mix(1.0, u_sun_gamma, tilt_morph));
+                    float sun_flat = pow(clamp((s_world.z + wrap) / (1.0 + wrap), 0.0, 1.0),
+                                         mix(1.0, u_sun_gamma, tilt_morph));
+                    // Cast-shadow visibility (Phase 4): multiplies the SUN term only, never sky/occ (games'
+                    //  rule: AO on ambient, shadows on direct). Strength interpolates 2D->3D (default 0 in
+                    //  2D: swisstopo uses no cast shadows at zenith); haze lifts shadows with distance
+                    //  (aerial perspective). Runtime-skipped when strength is 0 - uniform-coherent branch,
+                    //  the march never executes at zenith with the default u_shadow_strength_2d = 0.
+                    float sunvis = 1.0;
+                    // Phase 3/4 debugging (docs/terrain-lighting-v2-plan.md, "Task C" robustness fix):
+                    //  shadow_amt carries the same haze-attenuated shadow signal out of this block so a
+                    //  SECOND, direct-luminance darkening (Imhof's Schattenton, see u_shadow_darken below
+                    //  and the L *= mix(...) a little further down) can use it too - the sun-term-only
+                    //  path above reads weak under the deliberately backlit yaw-only sun (third revision),
+                    //  since most shadowed pixels already have a small `sun` value to begin with.
+                    float shadow_amt = 0.0;
+                    #ifdef ELEVATION_MOSAIC
+                    float shadow_strength = mix(u_shadow_strength_2d, u_shadow_strength, tilt_morph);
+                    if (shadow_strength > 0.005) {
+                        float sh = sunShadow(currentRasterUV(ELEVATION_INDEX), s_world, elev, texwh, dxy_elev, coslat);
+                        float sh_haze = sh * (1.0 - u_haze_contrast * haze);
+                        sunvis = 1.0 - shadow_strength * sh_haze;
+                        shadow_amt = shadow_strength * sh_haze;
+                    }
+                    #endif
+                    // weights: fixed 2D constants (0.7/0.2/0.2) at T=0, interpolating to the retuned
+                    //  sun-dominant tilted-view sliders at T=1
+                    float w_amb = mix(0.7, u_amb_weight_3d, tilt_morph);
+                    float w_sky = mix(0.2, u_sky_weight,    tilt_morph);
+                    float w_sun = mix(0.2, u_sun_weight,    tilt_morph);
+                    // Tone pipeline - RESOLVED (docs/terrain-lighting-v2-plan.md Phase 2): every stage
+                    //  below reduces EXACTLY to the old 2D code at T=0 (proof in the plan). Assemble L:
+                    // occ also modulates the ambient term, scaled by u_occ_ambient (docs/terrain-
+                    //  lighting-v2-plan.md "Second revision": ambient is sky light too, so occluding
+                    //  it is physically honest, and raises occ's modulated share of the light from
+                    //  ~0.30*sky toward ~0.55+ at full tilt/strength - both mixes are tilt_morph-
+                    //  gated so T=0 is unaffected (flat ground: ts_shade == 0.5 -> occ == 1, so this
+                    //  is also a no-op on flat ground regardless of tilt, by construction).
+                    float L = w_amb * mix(1.0, occ, tilt_morph * u_occ_ambient)
+                            + w_sky * sky * mix(1.0, occ, tilt_morph) + w_sun * sun * sunvis;
+                    // normalize so FLAT UNOCCLUDED ground == 1 (not the old fixed theoretical max -
+                    //  that was the dynamic-range killer, F5.3 in the plan); off (divide by 1) at T=0.
+                    L /= mix(1.0, w_amb + w_sky + w_sun * sun_flat, tilt_morph);
+                    // old hard clamp(raw2d,0,1) at T=0 (u_lum_cap's mix is 1.0 there); gives the sun
+                    //  term headroom above flat-ground-normalized 1.0 at T=1 before the shoulder rolls
+                    //  it off.
+                    L = min(L, mix(1.0, u_lum_cap, tilt_morph));
+                    // rational shoulder: identical to the old 2D soft-clip (over = max(sh-0.95,0);
+                    //  sh -= over - over/(1+3*over)) at T=0, since that IS y = s + (m-s)*o/(o+(m-s))
+                    //  with s = 0.95, m = 0.95 + 1/3 (over/(1+3*over) == (1/3)*o/(o+1/3)).
+                    float m = mix(0.95 + 1.0/3.0, u_shoulder_max, tilt_morph);
+                    float o = max(L - 0.95, 0.0);
+                    L = L - o + (m - 0.95) * o / (o + (m - 0.95));
+                    // haze contrast attenuation, applied after the shoulder. Scaled by tilt_morph: in
+                    //  the old two-layer architecture haze only touched the 3D layer, whose entire
+                    //  contribution was weighted by tilt_morph in the final mix - and haze is NOT ~0 at
+                    //  zenith with 3D terrain on (fragments sit ~eyeh from the camera, so the fog
+                    //  exponential gives haze ~0.4 there); without the tilt_morph factor this line
+                    //  would wash ~25% of the shading contrast out of the zenith render, breaking the
+                    //  T=0 parity contract (docs/terrain-lighting-v2-plan.md Phase 2). haze == 0.0
+                    //  without TANGRAM_TERRAIN_3D, so a no-op there either way.
+                    L = mix(L, 1.0, u_haze_contrast * haze * tilt_morph);
+                    // Direct-luminance shadow darkening ("Schattenton", Task C, docs/terrain-lighting-v2-
+                    //  plan.md "Phase 3/4 debugging"): a deliberately non-physical graphic layer that
+                    //  darkens L itself wherever the cast-shadow march fires, ALONGSIDE (not instead of)
+                    //  the sun-term multiply that already went into L above via sunvis. Necessary because
+                    //  the sun-term-only path is nearly invisible under this model's deliberately backlit
+                    //  sun (yaw-only screen anchoring, third revision): shadowed pixels already have a
+                    //  small `sun`, so multiplying it further by sunvis barely moves L. Exact no-op when
+                    //  u_shadow_darken == 0 (the `1.0 - u_shadow_darken` factor) and gated by tilt_morph
+                    //  again here so it cannot engage at T=0 even if a 2D shadow-strength slider is
+                    //  nonzero (matching this file's zenith-parity discipline).
+                    L *= mix(1.0, 1.0 - u_shadow_darken, shadow_amt * tilt_morph);
+                    // composite as a translucent blend-over layer, same trick as the 2D 4*shading-3;
+                    //  gain/alpha interpolate from the 2D constants (4.0/0.25) at T=0 to the tilted-
+                    //  view sliders at T=1
+                    float gain = mix(4.0, u_shade3d_gain, tilt_morph);
+                    float alpha = mix(0.25, u_shade3d_alpha, tilt_morph);
+                    color = vec4(vec3(gain*L - (gain - 1.0)), alpha);
+                    // Warm/cool chromatic shading (docs/terrain-lighting-v2-plan.md Phase 3): sun-facing
+                    //  surfaces drift warm, shadowed surfaces cool blue-violet (Imhof/swisstopo practice and
+                    //  physical sky-fill). Buys face separation without more luminance contrast - crucial for
+                    //  the deliberately backlit tilted views (yaw-only sun, third revision). Tints are
+                    //  multipliers around 1.0, roughly luminance-neutral; warmth scales the deviation.
+                    //  Haze pulls the tint back to neutral with distance (aerial perspective desaturation),
+                    //  tilt-gated like the rest. At T=0 warmth defaults to u_shade_warmth_2d = 0 -> exact no-op.
+                    float t_warm = sun * sunvis;   // 0 = fully shadowed .. 1 = fully sun-facing
+                    vec3 tint = mix(u_shade_cool, u_shade_warm, t_warm);
+                    float warmth = mix(u_shade_warmth_2d, u_shade_warmth, tilt_morph)
+                                 * (1.0 - u_haze_contrast * haze * tilt_morph);
+                    color.rgb = max(color.rgb * mix(vec3(1.0), tint, warmth), 0.0);
+                    // contours/hypsometric tint (base_color) composite over the shading layer once,
+                    //  tilt-independent by design
                     color = mix(color, base_color, base_color.a);
                     #else
-                    color = calculateLighting(v_position.xyz, normal, base_color);
-                    color = vec4(color.rgb, 1.0);
+                    // Hillshade over a raster base map (e.g. satellite imagery): same explicit
+                    //  screen-anchored 2D formula as the blend-over branch above, applied to a white
+                    //  material - i.e. shading * base_color, exactly what
+                    //  calculateLighting(v_position.xyz, normal, base_color) reduced to before. raw2d
+                    //  was computed once in the normal block (in scope here - see comment there). The
+                    //  unified tilt-parameterized model (Phase 2) is scoped to the blend-over path only.
+                    color = vec4(clamp(raw2d, 0.0, 1.0) * base_color.rgb, 1.0);
+                    #endif
+                    #ifdef ELEVATION_MOSAIC
+                    // texture shading (docs/texture-shading-plan.md) applied to the FINAL color, after
+                    //  Lambertian lighting/contours, so it composes identically over every base_color
+                    //  branch (raster / 3D-terrain / 2D blend-over) and can be balanced against the
+                    //  normal hillshade (whose strength stays on the u_exaggerate slider):
+                    //  - ts_shade: 0.5 = neutral, < 0.5 valleys/canyons, > 0.5 ridges
+                    //  - ts_w: blend weight, ~0 on flat/neutral ground (so texture shading only touches
+                    //    real relief structure, never washes flat areas), scaled by the opacity slider
+                    //  - u_texture_shading_blend selects the compositing mode, continuously:
+                    //    0 = "tint": mix color toward the gray shade value (strong standalone
+                    //        texture-shading look, but desaturates/washes the base),
+                    //    1 = "multiply": scale the existing color by 2*ts_shade (darkens valleys,
+                    //        brightens ridges, preserving the base hillshade's own 3D effect)
+                    // Scaled by (1 - tilt_morph): with the old two-layer architecture this screen-space
+                    //  tint/multiply faded out at tilt for free via the final mix(color, color3d,
+                    //  tilt_morph) - the unified model above has no such outer mix, so without this
+                    //  explicit fade texture shading would double-apply at tilt (once here, once via
+                    //  `occ` in the unified model above).
+                    // `haze` (above) is declared inside the HILLSHADE_BLEND_OVER branch of this
+                    //  color block (with a const-0.0 fallback also inside that branch, gated on
+                    //  TANGRAM_TERRAIN_3D); this ts block runs after that branch's #endif, for BOTH
+                    //  the blend-over path and the raster-basemap (#else, ELEVATION_INDEX) path - in
+                    //  the latter, `haze` does not exist. Re-derive a haze value that is always in
+                    //  scope here; in the raster-basemap branch tilt_morph is `const float 0.0` (see
+                    //  the normal block, `#if defined(TANGRAM_TERRAIN_3D) && !ELEVATION_INDEX`), so
+                    //  ts_op below reduces to plain u_texture_shading_opacity there regardless of
+                    //  ts_haze/ts_op3d - the guard only needs to compile, not matter numerically.
+                    #ifdef HILLSHADE_BLEND_OVER
+                    float ts_haze = haze;
+                    #else
+                    const float ts_haze = 0.0;  // raster-basemap branch: no haze in scope here
+                    #endif
+                    // Deliberate restoration of the whole-color texture-shading path at tilt
+                    //  (docs/terrain-lighting-v2-plan.md "Second revision: texture shading
+                    //  invisible at tilt"): the 2D ts_op above fades OUT with tilt by design, and
+                    //  occ (the only other place ts reaches at tilt) modulates just the sky slice
+                    //  of the light (~0.30*sky), ceiling-clamped, and haze-attenuated twice - net
+                    //  ridge/valley luminance swing ~0.08 at full tilt vs ~0.4-0.5 in 2D, ~5-6x too
+                    //  weak to see. ts_op3d ramps a whole-color ts multiply back in as tilt_morph
+                    //  rises, with its own haze falloff (aerial perspective, consistent with the
+                    //  rest of the tilted model); at tilt_morph == 0 this mix reduces EXACTLY to
+                    //  the old `u_texture_shading_opacity * (1.0 - tilt_morph)` (== u_texture_
+                    //  shading_opacity at T=0) - zenith parity preserved.
+                    float ts_op3d = u_texture_shading_opacity_3d * (1.0 - u_haze_contrast * ts_haze);
+                    float ts_op = mix(ts_op3d, u_texture_shading_opacity, 1.0 - tilt_morph);
+                    float ts_w = abs(ts_shade - 0.5) * 2.0 * ts_op;
+                    vec3 ts_tint = mix(color.rgb, vec3(ts_shade), ts_w);
+                    vec3 ts_mult = color.rgb * mix(1.0, 2.0*ts_shade, ts_op);
+                    color.rgb = mix(ts_tint, ts_mult, u_texture_shading_blend);
+                    #ifdef HILLSHADE_BLEND_OVER
+                    // in 2D blend-over mode the hillshade layer composites over the basemap with its own
+                    //  alpha; make sure texture-shaded relief also shows through where the layer would
+                    //  otherwise be nearly transparent
+                    color.a = max(color.a, ts_w);
+                    #endif
                     #endif
                     // prevent duplicate call to calculateLighting()
                     #undef TANGRAM_LIGHTING_FRAGMENT
@@ -254,7 +1074,12 @@ layers:
     earth:
         enabled: false  # enabled by update from mapsources.yaml entry (only for vector base map)
         data: { source: elevation }
-        draw: { hillshade: { color: global.earth_color, order: global.earth_order } }
+        draw:
+            hillshade: { color: global.earth_color, order: global.earth_order }
+            # opaque terrain surface below all polygons (landuse starts at order 510); the hillshade
+            #  rule above blends shading over land cover / landuse polygons from its order (599) above
+            #  them, identically in 2D and 3D - see the terrain-ground style
+            terrain-ground: { color: global.earth_color, order: 50 }
 
     contour-labels:
         data: { source: elevation }

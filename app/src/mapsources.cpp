@@ -3,6 +3,7 @@
 #include "util.h"
 #include "scene/scene.h"
 #include "style/style.h"  // for making uniforms avail as GUI variables
+#include "data/tileSource.h"  // for the resolution-retention sliders (TileSource::lodAreaBias)
 #include "data/mbtilesDataSource.h"
 #include "data/networkDataSource.h"
 #include "util/yamlUtil.h"
@@ -740,6 +741,61 @@ void MapsSources::populateSceneVars()
       }
     }
   }
+  // Resolution-retention sliders (tile-pipeline-perf-plan.md "keep max resolution on zoom-out"):
+  // TileSource::lodAreaBias is live C++ state (TileManager reads it every frame), not a shader
+  // uniform or a global scene var baked in at load time, so it can't go through the
+  // gui_variables dispatch above - direct-poke pattern instead (find the live TileSource, set
+  // the value, requestRender()), same as u_texture_shading_auto in MapsApp::mapUpdate. Exposed
+  // per source (landcover vs. hillshading/texture-shading) so the resolution/perf tradeoff is
+  // the user's own call.
+  auto addResolutionBiasSlider = [&](const char* label, const char* srcname, const char* cfgkey){
+    std::shared_ptr<Tangram::TileSource> src;
+    for(auto& s : app->map->getScene()->tileSources()) {
+      if(s->name() == srcname) { src = s; break; }
+    }
+    if(!src) { return; }
+    float initial = app->config["resolution_bias"][cfgkey].as<float>(src->lodAreaBias());
+    src->setLodAreaBias(initial);
+    auto spinBox = createTextSpinBox(initial, 0.1, 1.0, 4.0, "%.1f");
+    spinBox->onValueChanged = [=](real val){
+      src->setLodAreaBias(float(val));
+      app->config["resolution_bias"][cfgkey] = float(val);
+      app->platform->requestRender();
+    };
+    varsContent->addWidget(createTitledRow(label, spinBox));
+  };
+  addResolutionBiasSlider("Landcover Resolution", "osm", "osm");
+  addResolutionBiasSlider("Hillshade Resolution", "elevation", "elevation");
+
+  // Overzoom step width (2026-07-11 profiling/UX report: a visible hard "pop" in elevation
+  // mosaic/hillshade detail at a fixed, reproducible pan position). TileManager::updateTileSets()'s
+  // `s` escalation is a staircase function of on-screen area, stepping up by one whole zoom level
+  // (and so e.g. one whole doubling of RasterSource::overzoomTargetZoom()'s composite resolution)
+  // every time area crosses a fixed ratio - see TileSource::ZoomOptions::overzoomStepExponent's
+  // doc comment. Unlike the resolution-bias sliders above (which only shift WHEN the staircase
+  // starts), this widens the staircase's own step spacing, so the SAME size jump requires more
+  // distance/shrinkage to trigger. Does NOT help a tile whose own z has already hit the source's
+  // maxZoom (overzoom is bypassed entirely there, independent of any slider - see that
+  // investigation) - only affects tiles still within their overzoom-eligible range.
+  auto addOverzoomStepSlider = [&](const char* label, const char* srcname, const char* cfgkey){
+    std::shared_ptr<Tangram::TileSource> src;
+    for(auto& s : app->map->getScene()->tileSources()) {
+      if(s->name() == srcname) { src = s; break; }
+    }
+    if(!src) { return; }
+    float initial = app->config["overzoom_step"][cfgkey].as<float>(src->overzoomStepExponent());
+    src->setOverzoomStepExponent(initial);
+    auto spinBox = createTextSpinBox(initial, 0.5, 2.0, 8.0, "%.1f");
+    spinBox->onValueChanged = [=](real val){
+      src->setOverzoomStepExponent(float(val));
+      app->config["overzoom_step"][cfgkey] = float(val);
+      app->platform->requestRender();
+    };
+    varsContent->addWidget(createTitledRow(label, spinBox));
+  };
+  addOverzoomStepSlider("Landcover Overzoom Step", "osm", "osm");
+  addOverzoomStepSlider("Hillshade Overzoom Step", "elevation", "elevation");
+
   varsSeparator->setVisible(!varsContent->containerNode()->children().empty());
 
   std::string credits;
