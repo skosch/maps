@@ -388,9 +388,14 @@ styles:
                 TEXTURE_SHADING_MAX_LEVELS: 8
                 # Cast-shadow march step count (docs/terrain-lighting-v2-plan.md Phase 4):
                 #  compile-time loop bound (GLSL ES 1.00 requires a constant bound), same
-                #  pattern as TEXTURE_SHADING_MAX_LEVELS above. Cost is ~16 textureLod taps
+                #  pattern as TEXTURE_SHADING_MAX_LEVELS above. Cost is ~12 textureLod taps
                 #  when shadows are enabled (u_shadow_strength/_2d > 0), skipped otherwise.
-                TERRAIN_SHADOW_STEPS: 16
+                # Perf (2026-07-11 profiling): reduced from 16 - reach is d0 * growth^steps
+                #  (see `d *= growth` in the global block's sunShadow()), so this was reduced
+                #  together with that multiplier (1.45 -> ~1.64) to keep the SAME total shadow
+                #  reach at fewer, coarser steps - a naive step-count cut alone would silently
+                #  truncate how far shadows can cast instead of just coarsening their sampling.
+                TERRAIN_SHADOW_STEPS: 12
             uniforms:
                 u_exaggerate: 4.5
                 u_contour_color: global.contour_color
@@ -414,7 +419,12 @@ styles:
                 #  the 2D opacity OUT (see ts_op in the color block); default 0.5 restores a
                 #  visible whole-color texture-shading multiply at tilt
                 u_texture_shading_opacity_3d: 0.5
-                u_texture_shading_levels: 6
+                # Perf (2026-07-11 profiling): each level costs one dependent getElevationAtLod
+                #  fetch in textureShading() below, unconditionally on every hillshade fragment at
+                #  every tilt (not tilt-gated like the shadow march). Reduced from 6 - drops the
+                #  coarsest (broadest-landform) octaves first, which contribute the least visible
+                #  detail per fetch; 4 read too flat, settled on 5.
+                u_texture_shading_levels: 5
                 u_texture_shading_scale: 1.25
                 u_texture_shading_blend: 1.0
                 # Unified tilt-parameterized terrain luminance knobs (docs/terrain-lighting-v2-
@@ -624,7 +634,11 @@ styles:
                             // fade shadow found near the reach cap (adjacent tiles' mosaics disagree there)
                             s_i *= 1.0 - smoothstep(0.7, 1.0, d / dmax);
                             sh = max(sh, s_i);
-                            d *= 1.45;
+                            // Perf (2026-07-11): growth raised 1.45 -> 1.64 alongside
+                            //  TERRAIN_SHADOW_STEPS 16 -> 12 above, so d0 * growth^steps (the
+                            //  march's total reach) stays the same - coarser intermediate
+                            //  sampling, same maximum shadow-casting distance.
+                            d *= 1.64;
                         }
                         return sh;   // 0 = fully sunlit, 1 = fully shadowed
                     }

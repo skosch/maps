@@ -865,10 +865,13 @@ void MapsApp::mapUpdate(double time)
     // Restore persisted resolution-retention bias (see TileSource::lodAreaBias, MapsSources::
     // populateSceneVars) here too, not just when the settings panel happens to be opened -
     // otherwise a value the user dialed in during a previous session would silently reset to
-    // the scene's default until they reopened that panel.
+    // the scene's default until they reopened that panel. Same for the overzoom step-width
+    // (TileSource::overzoomStepExponent, MapsSources::populateSceneVars).
     for(auto& src : map->getScene()->tileSources()) {
       auto& biasCfg = config["resolution_bias"][src->name()];
       if(biasCfg) { src->setLodAreaBias(biasCfg.as<float>(src->lodAreaBias())); }
+      auto& stepCfg = config["overzoom_step"][src->name()];
+      if(stepCfg) { src->setOverzoomStepExponent(stepCfg.as<float>(src->overzoomStepExponent())); }
     }
     sendMapEvent(SCENE_LOADED);
   }
