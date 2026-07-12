@@ -507,6 +507,32 @@ decision).
 histogram (warmth must not change overall brightness: verify mean |ΔY| < 2/255), visibly
 warmer sun-facing / cooler shadowed faces. Zenith unchanged (warmth_2d=0).
 
+**Results (2026-07-11, implemented)**: Landed as specified in `hillshade.yaml`'s color
+block, immediately after `color = vec4(vec3(gain*L - (gain-1.0)), alpha)` and before the
+`base_color` composite (contours/hypsometric stay untinted, as required). `t_warm = sun *
+sunvis` — this is also the free Phase 3/4 interplay: cast-shadowed fragments have
+`sunvis` near 0, so they automatically read cool regardless of raw sun-facing angle.
+Defaults landed as given: `u_shade_cool: [0.88, 0.94, 1.10]`, `u_shade_warm: [1.10, 1.03,
+0.88]` (plain vec3 uniforms, yaml list syntax, no slider - gui_variables only binds
+scalars/colors), `u_shade_warmth: 0.5`, `u_shade_warmth_2d: 0.0`, with GUI sliders "3D
+Shade Warmth" / "2D Shade Warmth" (0-1, step 0.05). Haze attenuates the warmth strength
+itself (`warmth *= 1.0 - u_haze_contrast*haze*tilt_morph`), matching the pitfall note
+above. `color.rgb` is explicitly `max(...,0.0)`-clamped after the tint multiply, per the
+implementation spec, to stop a <1 tint channel from flipping a negative `gain*L-(gain-1)`
+value into a brighter (post-clamp) one instead of a darker one.
+
+Zenith parity note (flagged, not silently fixed): at T=0, `warmth =
+mix(u_shade_warmth_2d=0, u_shade_warmth, 0) = 0.0` exactly, so
+`mix(vec3(1.0), tint, 0.0) = vec3(1.0)` bit-exact and the tint multiply is a true no-op.
+However the added `max(color.rgb, 0.0)` is unconditional, and the pre-existing 2D formula
+can itself produce slightly negative `color.rgb` at T=0 (e.g. `raw2d` bottoms out at 0.7
+on a near-vertical face angled away from both light terms, giving `4*0.7-3 = -0.2`) which
+used to flow unclamped into the translucent blend-over. Those rare pixels now get an
+extra clamp-to-0 that didn't exist before Phase 3, a technically non-bit-exact zenith
+change; it was kept because the spec calls for it and any real-world instance is confined
+to knife-edge cliff faces where the previous negative excursion was already deep into
+extreme-shadow territory. User visual verification of the warm/cool split is pending.
+
 ### Phase 4 — Cast shadows (mip-accelerated horizon march)
 
 The flagship. Terrain-only shadow test along the sun direction using the elevation
@@ -597,6 +623,201 @@ write it with comments in the yaml style.)
   45°) within 15% of strength-0. If worse, drop SHADOW_STEPS to 12 before optimizing
   anything else.
 - Seam check as above.
+
+**Results (2026-07-11, implemented)**: Landed as `sunShadow()` in the hillshade style's
+`global` block (inside the same `#if defined(ELEVATION_MOSAIC) && defined
+(TANGRAM_FRAGMENT_SHADER)` region as `textureShading()`, reusing its
+`getElevationAtLod` forward declaration), called from the color block in place of the old
+`sunvis = 1.0` placeholder. Algebra was corrected relative to this section's original
+sketch, per convention (a) above: `tanSun = s_world.z / length(s_world.xy)` (no `/coslat`
+— `s_world` is a pure unit direction, so its own xy/z ratio is already the true tangent),
+and the horizon side is `tanH = (h - h0) / (d * coslat) - u_shadow_bias` (`d` in
+projected meters, `d*coslat` converts to the true-meter run to match `h`/`h0` which are
+true meters). Defaults landed as given: `u_shadow_strength: 0.6`,
+`u_shadow_strength_2d: 0.0`, `u_shadow_soft: 0.15`, `u_shadow_bias: 0.01`,
+`u_shadow_d0: 1.5`, `TERRAIN_SHADOW_STEPS: 16` (compile-time loop bound + `break`, same
+pattern as `TEXTURE_SHADING_MAX_LEVELS`). Sliders: "3D/2D Shadow Strength" (0-1, 0.05),
+"Shadow Softness" (0.01-0.5, 0.01), "Shadow Bias" (0-0.05, 0.005), "Shadow Start
+(texels)" (0.5-4, 0.25), grouped with a comment noting the feature requires the Texture
+Shading checkbox (ELEVATION_MOSAIC) on.
+
+**uv-north justification (documented, not yet empirically re-verified this session)**:
+tile-local uv's v-axis is assumed to equal world north, per the existing code's own
+convention rather than a fresh assumption — the `normal` block already computes
+`normal.xy = -hscale*grad/coslat` from `grad = vec2(h21-h01, h12-h10)/2` (i.e. +u and +v
+central differences) and dots that world-space-oriented normal against `s_world` for all
+existing 2D/3D lighting, which has rendered with correct polarity (ridges lit, valleys
+shaded, consistently oriented) through every prior revision. That would not be possible
+if +v corresponded to world south instead of north, since the sign of the y-term in every
+dot product would be flipped. `sunShadow()` reuses `sdir_uv = sdir/(dxy_elev*texwh)`
+without any extra sign flip, consistent with that convention.
+
+**Pending — user visual verification required** (per the task's own acceptance criteria,
+not run this session: no build/screenshot was taken). At north-up, shadows must fall
+*opposite* the sun, i.e. toward screen-lower-right (sun is screen-upper-left,
+azimuth 135°). **If shadows instead fall toward the wrong side (screen-upper-left, same
+side as the sun), the fix is to negate `sdir_uv.y` inside `sunShadow()` — do not add a
+uniform for this; it is a fixed sign convention, not a tunable.**
+
+Phase 3/4 interplay confirmed by construction: `t_warm = sun * sunvis` in the Phase 3
+code means cast-shadowed fragments (`sunvis` pulled toward 0 by `sunShadow()`)
+automatically drift toward the cool tint even where the raw sun-facing dot product
+alone would read warm — shadow and color temperature reinforce each other for free,
+no extra wiring needed.
+
+### Phase 3/4 debugging (2026-07-11): "no cast shadows or color separation, the new controls do nothing"
+
+User report after landing Phase 3+4: no visible cast shadows, no warm/cool separation,
+new sliders appear inert. Investigated by code reasoning only (no build/run/screenshot
+this session, per constraint) plus headless-instrumentation measurements from a prior
+session, reasoned about below. Three lines of investigation, in the order run:
+
+**A. Why might `u_exaggerate_3d` (or another new uniform) read as 0 in the executed
+shader?** Instrumentation from a prior session painted `tilt_morph` (≈1.0, correct),
+`shadow_strength`/`u_shadow_strength` (≈0.6, correct), `1.0 - sunShadow(...)` (crisp,
+plausible shadows, correct march), and `sun` (the half-Lambert sun term) — the last
+came back **nearly constant** across a whole Howe Sound/Lions frame (mean ≈0.58, p10
+≈0.51, p90 ≈0.62), matching `sun_flat` for the 35.264° sun almost exactly. Since
+`sun_flat` is the value `sun` takes on perfectly flat ground, a `sun` that never departs
+from it over extreme relief means the effective lighting normal is flat everywhere,
+i.e. `hscale = mix(u_exaggerate, u_exaggerate_3d, tilt_morph)` ≈ 0 at `tilt_morph` ≈ 1,
+i.e. `u_exaggerate_3d` reads ≈0 in-shader despite the yaml default of 2.0.
+
+Candidates examined and eliminated, with evidence:
+- **YAML indentation/placement**: `u_exaggerate_3d: 2.0` (hillshade.yaml, uniforms
+  block) sits at the identical indent as `u_sun_elev`/`u_sun_azimuth`, siblings that
+  demonstrably arrive (confirmed by `sun_flat` matching 35.264° exactly, and shadows
+  landing on the correct side per the azimuth). Byte-checked with `cat -A`; no tabs, no
+  stray whitespace.
+- **`elev > 0.` gate zeroing `hscale`** (hillshade.yaml normal block, `hscale = elev > 0.
+  ? mix(...) : 0.`): ruled out — the cast-shadow march (`sunShadow()`) reads real,
+  varying elevation differences along the ray to produce its crisp, correctly-oriented
+  shadow pattern, so `elev` is provably not stuck at/below 0 over this terrain. This
+  ternary is also unchanged from the pre-Phase-2 code (same pattern, just `u_exaggerate`
+  before Phase 2 added the `mix`), so it isn't a new regression.
+  candidate, verified via `git log -p`.
+- **Vertex-vs-fragment uniform location caching** (the task's lead hypothesis, per the
+  `-1`-caching comment in `tangram-es/core/src/style/style.cpp` around
+  `setupTileShaderUniforms`): eliminated. `#pragma tangram: normal` exists in BOTH
+  `tangram-es/core/shaders/polygon.vs:146` and `polygon.fs:85`, but the vertex copy is
+  gated `#if defined(TANGRAM_LIGHTING_VERTEX)` (`polygon.vs:143`); hillshade never sets
+  `lighting: vertex` (default is `LightingType::fragment`, `style.h:143`,
+  confirmed by `sceneLoader.cpp:1044-1051` — no `lighting:` key means the constructor
+  default holds), so the vertex-side normal block is compiled out entirely. The
+  `u_exaggerate_3d` reference lives only in the fragment shader, exactly like
+  `u_sun_elev` (which arrives fine) — no stage asymmetry exists between them.
+- **Uniform-plumbing code path itself** (`sceneLoader.cpp:1244-1266` `parseStyleUniforms`
+  / `loadShaderConfig`, `style.cpp:163-201` `setupSceneShaderUniforms`): `u_exaggerate_3d`
+  is parsed and bound through the exact same generic loop as every sibling float
+  uniform (declared once via `addSourceBlock("uniforms", ...)`, pushed once via
+  `styleUniforms().emplace_back(name, value)`, applied once per frame via
+  `setUniformf`). No special-casing exists anywhere in this path for any specific
+  uniform name; grepped for duplicate declarations of `u_exaggerate_3d` across all of
+  `assets/scenes/*.yaml` — only one.
+- **Shared-shader-program dedup** (`style.cpp:120-132`: a style reuses another style's
+  compiled `ShaderProgram` if their full vertex+fragment source text matches exactly,
+  which — combined with `UniformLocation`'s cache being tied to the specific
+  `ShaderProgram` instance's `m_glProgram`, `shaderProgram.h:34-46` — would be a real
+  cross-contamination risk if it fired): eliminated for this case. Hillshade's
+  fragment source is unique (its own `normal`/`color`/`global` blocks, texture-shading
+  functions, `sunShadow()`); no other style in the mixed scene (`terrain-ground`,
+  `heightglow`, `unlit-*`) generates byte-identical source, so hillshade's
+  `m_shaderProgram` is never shared.
+- **Saved-override persistence** (Task B mechanism, see below): checked the actual
+  user config (`~/.config/Ascend/mapsources.yaml`, `~/.config/Ascend/config.yaml`).
+  Neither contains ANY override for `u_exaggerate_3d` or any other hillshade shading
+  uniform (`stylus-bike-hike`'s only saved updates are `global.show_bike`/
+  `global.show_trails`; `terrain_3d.updates` in config.yaml is `{}`). `u_exaggerate_3d`
+  is also a brand-new uniform introduced in this same work, so no pre-existing saved
+  slider value could exist for it regardless. This mechanism does not explain the
+  current symptom, though it remains a real latent risk (documented in Task B below).
+
+**Conclusion for A**: every mechanism this session could name and check by reasoning
+was eliminated with concrete file:line evidence. The measurement (`sun` ≈ `sun_flat`,
+constant) is internally consistent with `u_exaggerate_3d` reading ≈0 in-shader, but no
+C++ code path was found that treats this uniform differently from siblings that
+demonstrably work — nothing here explains why ONE simple float uniform, bound through
+the exact same generic loop as its neighbors, would silently fail to arrive. **This is
+reported honestly as unresolved by pure code reasoning; it needs a runtime check** (a
+debug build that logs `glGetUniformLocation` results per style uniform name, or an
+on-screen readout of `u_exaggerate_3d` alongside `u_sun_elev` at the same tilt) that is
+out of scope for this session's no-build constraint. If the next session can build: add
+a one-line `LOGE` in `Style::setupSceneShaderUniforms` printing name + resolved GL
+location + value for every style uniform, once, and diff hillshade's dump against a
+known-good uniform.
+
+**B. The user-side override layer** (mechanism, confirmed real; not the live cause —
+see the elimination note above). Slider drags in the Sources panel
+(`app/src/mapsources.cpp:627-656` `processUniformVar`) mutate the in-memory uniform
+value immediately (`uniform.second.set<float>(val)`) and stage the change in
+`app->sceneUpdates` / `currUpdates` (session-only). Nothing is written to disk until
+the user clicks **"Save Source"** (the disk icon at the top of the source's edit panel,
+`saveBtn`, `mapsources.cpp:1060-1065`), which calls `createSource(currSource)`
+(`mapsources.cpp:318-359`): it copies `currUpdates` into
+`mapSources[<source-key>]["updates"]` and calls `saveSources()`
+(`mapsources.cpp:208-220`), which writes the **entire** in-memory source list to
+`~/.config/Ascend/mapsources.yaml` (path is `sources.file` in `config.yaml`, default
+`mapsources.yaml`, resolved relative to the app's config directory —
+`mapsources.cpp:173-180`). On every subsequent app start (or any `rebuildSource()`,
+e.g. switching sources), `mapSources[<key>]["updates"]` is read back
+(`mapsources.cpp:269-270` inside `rebuildSource`) and layered into `app->sceneUpdates`,
+which the scene loader applies **on top of** the yaml's own defaults — i.e. any uniform
+path saved this way is pinned indefinitely, silently masking every future default
+change shipped for that uniform, until removed. A second, scene-wide (not per-source)
+override layer exists at `terrain_3d.updates` in `config.yaml` (applied in
+`rebuildSource`, `mapsources.cpp:281-284`, whenever 3D terrain is on).
+
+**Live-config check (this session)**: read the actual files. `stylus-bike-hike`
+(`last_source` in `config.yaml`) has `updates: {global.show_bike: true,
+global.show_trails: true}` only — no hillshade shader-uniform overrides.
+`terrain_3d.updates: {}` in `config.yaml`. No source in `mapsources.yaml` pins any
+`styles.hillshade.shaders.uniforms.*` path. **So this mechanism is not currently
+masking anything** — but it is a real, easy-to-trigger trap for future sessions of
+hand-tuning, so documenting the discard procedure below is worthwhile regardless.
+
+**User instructions — inspecting/clearing saved overrides:**
+1. Open `~/.config/Ascend/mapsources.yaml` in a text editor.
+2. Find the entry for whichever source you use for hillshading (currently
+   `stylus-bike-hike`, per `config.yaml`'s `sources.last_source`) and any other source
+   whose `layers:` includes `hillshade`/`stylus-osm-terrain`.
+3. Look under that entry's `updates:` key for anything starting with
+   `styles.hillshade.shaders.uniforms.` — each such line is a pinned override that will
+   beat the yaml default on every load. Delete the line to fall back to the shipped
+   default (or edit the value directly).
+4. Also check `~/.config/Ascend/config.yaml`'s `terrain_3d: { updates: {...} }` — same
+   mechanism, applies whenever 3D terrain is enabled regardless of source.
+5. There is no in-app "reset to default" button for an individual slider; the only
+   in-app control is to NOT press "Save Source" after tuning (session-only changes
+   vanish on restart/source switch), or to edit the yaml files directly as above while
+   the app is closed.
+
+**C. Robustness fixes applied regardless of A/B** (hillshade.yaml, color block):
+1. **Direct-luminance shadow darkening** ("Schattenton"): cast shadows previously only
+   multiplied the sun term (`sunvis`) — but the sun is deliberately backlit at every
+   tilt (yaw-only screen anchoring, third revision), so most shadowed pixels already
+   have a small `sun` value and gain little extra visible darkening from `sunvis`
+   alone. Added `shadow_amt` (the same haze-attenuated shadow signal, exposed outside
+   the `#ifdef ELEVATION_MOSAIC` block) and `L *= mix(1.0, 1.0 - u_shadow_darken,
+   shadow_amt * tilt_morph)` right after the haze-contrast attenuation line, alongside
+   (not replacing) the existing sun-term multiply. New uniform `u_shadow_darken`
+   (default 0.25, slider "Shadow Darken (direct)", 0-1 step 0.05). Exact no-op when
+   `u_shadow_darken == 0` (the `1.0 - u_shadow_darken` factor) and exact no-op at T=0
+   (the explicit `* tilt_morph` factor, redundant with but independent of
+   `shadow_amt`'s own zeroing, matching this file's belt-and-suspenders zenith-parity
+   style elsewhere).
+2. **Warm/cool tint too weak to see.** Verified the compositing arithmetic: tint
+   deviation (±0.10-0.12) × `u_shade_warmth` (0.5) × haze damp (~0.7-1.0) × overlay rgb
+   range (~0.7) × translucent alpha (0.55) multiplies out to roughly 1-4/255 of actual
+   on-screen chroma difference — invisible even though the shader logic was correct.
+   Doubled the tint deviations (`u_shade_cool: [0.88,0.94,1.10] → [0.78,0.88,1.24]`,
+   `u_shade_warm: [1.10,1.03,0.88] → [1.24,1.06,0.78]`) and raised `u_shade_warmth`'s
+   default `0.5 → 1.0`; `u_shade_warmth_2d` stays 0 (2D look unchanged). Added a
+   comment at the uniform defaults noting the alpha-compositing bottleneck for future
+   tuning sessions.
+
+Neither C fix depends on A's root cause being found or B being the live cause — both
+are applied unconditionally as improvements to the existing feature, and both remain
+exact no-ops at T=0 / default-off per the zenith-parity contract.
 
 ### Phase 5 — FUTURE (not now): realistic sun mode
 

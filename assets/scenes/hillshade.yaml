@@ -263,6 +263,74 @@ application:
             min: 0
             max: 1
             step: 0.05
+        # Warm/cool chromatic shading (docs/terrain-lighting-v2-plan.md Phase 3): sun-facing
+        #  surfaces drift warm, shadowed surfaces cool blue-violet, buying face separation
+        #  without more luminance contrast. 0 = today's exact gray. The tint colors
+        #  themselves (u_shade_cool/u_shade_warm) are plain vec3 uniforms, tuned in yaml -
+        #  gui_variables only handles scalars/colors, not arbitrary vec3s.
+        u_shade_warmth:
+            style: hillshade
+            label: 3D Shade Warmth
+            min: 0
+            max: 1
+            step: 0.05
+        # 2D counterpart - nonzero departs from the classic gray 2D look, so off by default
+        u_shade_warmth_2d:
+            style: hillshade
+            label: 2D Shade Warmth
+            min: 0
+            max: 1
+            step: 0.05
+        # Cast shadows (docs/terrain-lighting-v2-plan.md Phase 4): mip-accelerated horizon
+        #  march over the elevation mosaic toward the sun. Requires the "Texture Shading"
+        #  checkbox (ELEVATION_MOSAIC) to be on - the march reuses the same mosaic mip
+        #  pyramid textureShading() builds; with texture shading off the shadow sliders
+        #  below have no effect (the march is compiled out entirely).
+        u_shadow_strength:
+            style: hillshade
+            label: 3D Shadow Strength
+            min: 0
+            max: 1
+            step: 0.05
+        u_shadow_strength_2d:
+            style: hillshade
+            label: 2D Shadow Strength
+            min: 0
+            max: 1
+            step: 0.05
+        u_shadow_soft:
+            style: hillshade
+            label: Shadow Softness
+            min: 0.01
+            max: 0.5
+            step: 0.01
+        u_shadow_bias:
+            style: hillshade
+            label: Shadow Bias
+            min: 0
+            max: 0.05
+            step: 0.005
+        u_shadow_d0:
+            style: hillshade
+            label: Shadow Start (texels)
+            min: 0.5
+            max: 4
+            step: 0.25
+        # Phase 3/4 debugging (docs/terrain-lighting-v2-plan.md): cast shadows only multiply the
+        #  SUN term (games' "shadows on direct light only" rule) - but the sun is deliberately
+        #  backlit at every tilt (yaw-only screen-anchored azimuth, "Third revision"), so most
+        #  shadowed pixels already have a small `sun` value and multiplying it further by sunvis
+        #  changes little - cast shadows read weakly even when the march itself is correct. This
+        #  adds a second, DIRECT-LUMINANCE darkening (Imhof's "Schattenton"): a deliberately
+        #  non-physical graphic layer that darkens L itself wherever the shadow march fires,
+        #  legible under any sun geometry. 0 = off (today's sun-term-only behavior). Tilt-gated
+        #  and exact no-op at T=0 regardless of the 2D shadow-strength sliders above.
+        u_shadow_darken:
+            style: hillshade
+            label: Shadow Darken (direct)
+            min: 0
+            max: 1
+            step: 0.05
 
 
 styles:
@@ -318,6 +386,11 @@ styles:
                 #  getElevationAt() missing the mosaic UV remap (fixed in elevation.yaml), not deep
                 #  mip levels.
                 TEXTURE_SHADING_MAX_LEVELS: 8
+                # Cast-shadow march step count (docs/terrain-lighting-v2-plan.md Phase 4):
+                #  compile-time loop bound (GLSL ES 1.00 requires a constant bound), same
+                #  pattern as TEXTURE_SHADING_MAX_LEVELS above. Cost is ~16 textureLod taps
+                #  when shadows are enabled (u_shadow_strength/_2d > 0), skipped otherwise.
+                TERRAIN_SHADOW_STEPS: 16
             uniforms:
                 u_exaggerate: 4.5
                 u_contour_color: global.contour_color
@@ -398,6 +471,38 @@ styles:
                 u_shade3d_gain: 1.4
                 # aerial perspective: fraction of shading contrast removed at full haze
                 u_haze_contrast: 0.6
+                # Warm/cool chromatic shading (docs/terrain-lighting-v2-plan.md Phase 3):
+                #  multiplier tints around 1.0 for the sun-facing / shadowed extremes, and
+                #  the strength that blends toward them (T=1 default vs. 2D default 0 - see
+                #  the color block for the mix and the gui_variables comment above).
+                # Phase 3/4 debugging note: the tint stack multiplies out to only ~1-4/255 of
+                #  actual chroma on screen once the alpha-compositing bottleneck (overlay rgb
+                #  ~0.7 range x alpha 0.55 x this deviation x warmth) is accounted for - the
+                #  warm/cool split was effectively invisible at the original deviations, even
+                #  though the shader logic itself was correct. Deviations doubled from
+                #  (0.88/0.94/1.10, 1.10/1.03/0.88) and u_shade_warmth raised 0.5 -> 1.0 to
+                #  compensate; still nowhere near clipping (tint * gain*L stays well inside
+                #  [0,~1.3] over realistic L).
+                u_shade_cool: [0.78, 0.88, 1.24]
+                u_shade_warm: [1.24, 1.06, 0.78]
+                u_shade_warmth: 1.0
+                u_shade_warmth_2d: 0.0
+                # Cast shadows (docs/terrain-lighting-v2-plan.md Phase 4): strength
+                #  interpolates 2D -> 3D like the rest of the model (default 0 in 2D, no
+                #  cast shadows at zenith, matching swisstopo practice); soft/bias/d0 tune
+                #  the horizon-march penumbra width, self-shadow-acne guard, and march start
+                #  distance respectively (see sunShadow() in the global block).
+                u_shadow_strength: 0.6
+                u_shadow_strength_2d: 0.0
+                u_shadow_soft: 0.15
+                u_shadow_bias: 0.01
+                u_shadow_d0: 1.5
+                # Phase 3/4 debugging (docs/terrain-lighting-v2-plan.md): direct-luminance
+                #  "Schattenton" shadow darkening, alongside (not instead of) the sun-term
+                #  multiply above - see shadow_amt/the L *= mix(...) in the color block. 0.25
+                #  makes cast shadows legible even under the deliberately backlit sun geometry
+                #  where the sun-term-only path alone reads weak.
+                u_shadow_darken: 0.25
                 # https://github.com/der-stefan/OpenTopoMap/blob/master/mapnik/relief_color_text_file.txt
                 # - stop offset in meters/10000
                 u_terrain_color: |
@@ -483,6 +588,45 @@ styles:
                         //  band scales with the ground size of a texel)
                         float az = u_texture_shading_contrast * u_texture_shading_auto * z / (texelMeters * exp2(b));
                         return az / (2.0*sqrt(1.0 + az*az)) + 0.5;
+                    }
+                    // Cast-shadow test: march from this fragment toward the sun over the elevation mosaic's
+                    //  mip pyramid, tracking the max horizon tangent; if the horizon rises above the sun's
+                    //  elevation, the fragment is shadowed. Soft comparison = penumbra; lod grows with
+                    //  distance (cheap cone-tracing + denoise). Reach is capped at the mosaic's neighbor
+                    //  ring (~1 tile width; docs/terrain-lighting-v2-plan.md Phase 4 pitfalls) with a fade
+                    //  so truncated long shadows end gently instead of seaming at tile borders.
+                    // uv: tile-local fragment position; s_world: unit sun vector (world, z up);
+                    // h0: fragment elevation (true meters); texwh: texels per tile (mosaic-corrected);
+                    // dxy_elev: projected meters per texel; coslat: true meters = projected * coslat.
+                    float sunShadow(vec2 uv, vec3 s_world, float h0, vec2 texwh, vec2 dxy_elev, float coslat) {
+                        vec2 sdir = s_world.xy / max(length(s_world.xy), 1e-4);   // horizontal sun dir (world)
+                        // tile-local uv per projected meter, per axis (uv v-axis == world north: verified via
+                        //  the normal block's gradient convention - see the plan doc Phase 4 results note)
+                        vec2 sdir_uv = sdir / (dxy_elev * texwh);
+                        float tanSun = s_world.z / max(length(s_world.xy), 1e-4);
+                        // march reach: keep uv + sdir_uv*d inside [-0.95, 1.95] on both axes
+                        vec2 dmax2 = vec2(1e9);
+                        if (sdir_uv.x > 1e-9) { dmax2.x = (1.95 - uv.x) / sdir_uv.x; }
+                        else if (sdir_uv.x < -1e-9) { dmax2.x = (-0.95 - uv.x) / sdir_uv.x; }
+                        if (sdir_uv.y > 1e-9) { dmax2.y = (1.95 - uv.y) / sdir_uv.y; }
+                        else if (sdir_uv.y < -1e-9) { dmax2.y = (-0.95 - uv.y) / sdir_uv.y; }
+                        float dmax = min(dmax2.x, dmax2.y);
+                        float d = u_shadow_d0 * dxy_elev.x;                        // start ~1.5 texels out
+                        float sh = 0.0;
+                        for (int i = 0; i < TERRAIN_SHADOW_STEPS; i++) {
+                            if (d > dmax) { break; }
+                            float lod = max(log2(d / dxy_elev.x) - 2.0, 0.0);      // getElevationAtLod caps internally
+                            float h = getElevationAtLod(uv + sdir_uv * d, lod);
+                            // horizon tangent in true-meter space; u_shadow_bias tilts the ray up slightly to
+                            //  prevent self-shadow acne from mip-blurred near samples
+                            float tanH = (h - h0) / (d * coslat) - u_shadow_bias;
+                            float s_i = clamp((tanH - tanSun) / max(u_shadow_soft, 1e-3), 0.0, 1.0);
+                            // fade shadow found near the reach cap (adjacent tiles' mosaics disagree there)
+                            s_i *= 1.0 - smoothstep(0.7, 1.0, d / dmax);
+                            sh = max(sh, s_i);
+                            d *= 1.45;
+                        }
+                        return sh;   // 0 = fully sunlit, 1 = fully shadowed
                     }
                     #endif
                 normal: |
@@ -731,14 +875,35 @@ styles:
                     // sun: half-Lambert wrap + gamma, both interpolated from "off" (wrap 0, gamma 1 -
                     //  a hard Lambertian clamp(dot,0,1), exactly raw2d's sun term) at T=0 to the tilted-
                     //  view tuning at T=1. s_world (normal block) is the single screen-anchored sun
-                    //  vector, world-elevation-clamped, shared with raw2d. sunvis is the Phase 4 cast-
-                    //  shadow visibility factor - fixed at 1.0 (no shadowing modeled yet).
+                    //  vector, world-elevation-clamped, shared with raw2d. sunvis (below) is the Phase 4
+                    //  cast-shadow visibility factor.
                     float wrap = mix(0.0, u_sun_wrap, tilt_morph);
                     float sun = pow(clamp((dot(normal, s_world) + wrap) / (1.0 + wrap), 0.0, 1.0),
                                     mix(1.0, u_sun_gamma, tilt_morph));
                     float sun_flat = pow(clamp((s_world.z + wrap) / (1.0 + wrap), 0.0, 1.0),
                                          mix(1.0, u_sun_gamma, tilt_morph));
-                    float sunvis = 1.0;  // Phase 4: multiplies the sun term only, never sky/occ
+                    // Cast-shadow visibility (Phase 4): multiplies the SUN term only, never sky/occ (games'
+                    //  rule: AO on ambient, shadows on direct). Strength interpolates 2D->3D (default 0 in
+                    //  2D: swisstopo uses no cast shadows at zenith); haze lifts shadows with distance
+                    //  (aerial perspective). Runtime-skipped when strength is 0 - uniform-coherent branch,
+                    //  the march never executes at zenith with the default u_shadow_strength_2d = 0.
+                    float sunvis = 1.0;
+                    // Phase 3/4 debugging (docs/terrain-lighting-v2-plan.md, "Task C" robustness fix):
+                    //  shadow_amt carries the same haze-attenuated shadow signal out of this block so a
+                    //  SECOND, direct-luminance darkening (Imhof's Schattenton, see u_shadow_darken below
+                    //  and the L *= mix(...) a little further down) can use it too - the sun-term-only
+                    //  path above reads weak under the deliberately backlit yaw-only sun (third revision),
+                    //  since most shadowed pixels already have a small `sun` value to begin with.
+                    float shadow_amt = 0.0;
+                    #ifdef ELEVATION_MOSAIC
+                    float shadow_strength = mix(u_shadow_strength_2d, u_shadow_strength, tilt_morph);
+                    if (shadow_strength > 0.005) {
+                        float sh = sunShadow(currentRasterUV(ELEVATION_INDEX), s_world, elev, texwh, dxy_elev, coslat);
+                        float sh_haze = sh * (1.0 - u_haze_contrast * haze);
+                        sunvis = 1.0 - shadow_strength * sh_haze;
+                        shadow_amt = shadow_strength * sh_haze;
+                    }
+                    #endif
                     // weights: fixed 2D constants (0.7/0.2/0.2) at T=0, interpolating to the retuned
                     //  sun-dominant tilted-view sliders at T=1
                     float w_amb = mix(0.7, u_amb_weight_3d, tilt_morph);
@@ -776,12 +941,35 @@ styles:
                     //  T=0 parity contract (docs/terrain-lighting-v2-plan.md Phase 2). haze == 0.0
                     //  without TANGRAM_TERRAIN_3D, so a no-op there either way.
                     L = mix(L, 1.0, u_haze_contrast * haze * tilt_morph);
+                    // Direct-luminance shadow darkening ("Schattenton", Task C, docs/terrain-lighting-v2-
+                    //  plan.md "Phase 3/4 debugging"): a deliberately non-physical graphic layer that
+                    //  darkens L itself wherever the cast-shadow march fires, ALONGSIDE (not instead of)
+                    //  the sun-term multiply that already went into L above via sunvis. Necessary because
+                    //  the sun-term-only path is nearly invisible under this model's deliberately backlit
+                    //  sun (yaw-only screen anchoring, third revision): shadowed pixels already have a
+                    //  small `sun`, so multiplying it further by sunvis barely moves L. Exact no-op when
+                    //  u_shadow_darken == 0 (the `1.0 - u_shadow_darken` factor) and gated by tilt_morph
+                    //  again here so it cannot engage at T=0 even if a 2D shadow-strength slider is
+                    //  nonzero (matching this file's zenith-parity discipline).
+                    L *= mix(1.0, 1.0 - u_shadow_darken, shadow_amt * tilt_morph);
                     // composite as a translucent blend-over layer, same trick as the 2D 4*shading-3;
                     //  gain/alpha interpolate from the 2D constants (4.0/0.25) at T=0 to the tilted-
                     //  view sliders at T=1
                     float gain = mix(4.0, u_shade3d_gain, tilt_morph);
                     float alpha = mix(0.25, u_shade3d_alpha, tilt_morph);
                     color = vec4(vec3(gain*L - (gain - 1.0)), alpha);
+                    // Warm/cool chromatic shading (docs/terrain-lighting-v2-plan.md Phase 3): sun-facing
+                    //  surfaces drift warm, shadowed surfaces cool blue-violet (Imhof/swisstopo practice and
+                    //  physical sky-fill). Buys face separation without more luminance contrast - crucial for
+                    //  the deliberately backlit tilted views (yaw-only sun, third revision). Tints are
+                    //  multipliers around 1.0, roughly luminance-neutral; warmth scales the deviation.
+                    //  Haze pulls the tint back to neutral with distance (aerial perspective desaturation),
+                    //  tilt-gated like the rest. At T=0 warmth defaults to u_shade_warmth_2d = 0 -> exact no-op.
+                    float t_warm = sun * sunvis;   // 0 = fully shadowed .. 1 = fully sun-facing
+                    vec3 tint = mix(u_shade_cool, u_shade_warm, t_warm);
+                    float warmth = mix(u_shade_warmth_2d, u_shade_warmth, tilt_morph)
+                                 * (1.0 - u_haze_contrast * haze * tilt_morph);
+                    color.rgb = max(color.rgb * mix(vec3(1.0), tint, warmth), 0.0);
                     // contours/hypsometric tint (base_color) composite over the shading layer once,
                     //  tilt-independent by design
                     color = mix(color, base_color, base_color.a);
