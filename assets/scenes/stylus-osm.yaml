@@ -1785,7 +1785,22 @@ layers:
         points:
           sprite: peak
           size: 14px
-          priority: function() { return global.priority.peak + (1 - feature.ele/16384.0); }
+          # docs/label-placement-plan.md Phase 2: real OSM prominence tag wins outright when
+          # present (Math.sqrt-compressed into the fractional part, same idiom as place_fn
+          # above); otherwise fall back to today's pure-elevation weighting as a *provisional*
+          # priority and ask LabelManager to refine it on the main thread using the CPU
+          # texture-shading sampler once the elevation mosaic is available at this peak's
+          # position (priority_texture_shading below) -- the texture-shading term can't safely
+          # run here, at tile-build time, since this function executes on a TileWorker thread
+          # and the elevation raster mosaic is main-thread-only (see textureShading.h).
+          priority: |
+            function() {
+                if (feature.prominence) {
+                    return global.priority.peak - Math.round(Math.sqrt(Math.min(1, feature.prominence/3000)) * 4096)/65536;
+                }
+                return global.priority.peak + (1 - feature.ele/16384.0);
+            }
+          priority_texture_shading: true
           text:
             text_source: |
               function() {
