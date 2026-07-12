@@ -469,6 +469,8 @@ fonts:
   IBM Plex Sans Condensed:
     - weight: 600
       url: ../shared/fonts/IBMPlexSans_Condensed-SemiBold.ttf
+    - weight: 400
+      url: ../shared/fonts/IBMPlexSans_Condensed-Regular.ttf
   IBM Plex Serif:
     - weight: 400
       style: italic
@@ -795,10 +797,7 @@ layers:
           stroke: { color: global.color.park_halo, width: 3 }
     commercial:
       filter:
-        - {
-            landuse:
-              [commercial, retail, industrial, military, winter_sports],
-          }
+        - { landuse: [commercial, retail, industrial, military, winter_sports] }
         - { amenity: prison }
       draw:
         {
@@ -1896,21 +1895,57 @@ layers:
                 return global.priority.peak + (1 - feature.ele/16384.0);
             }
           priority_texture_shading: true
+          # docs/label-placement-plan.md Task 1: name (semibold) + elevation (regular) in
+          # two different font weights. Confirmed there is NO per-line/per-glyph-run font
+          # override anywhere in the text pipeline -- FontContext::layoutText shapes an
+          # entire label's text (including embedded "\n") with exactly one alfons::Font,
+          # and TextStyle::Parameters/DrawRuleData::params both hold a single font per
+          # rule -- so a single combined "name\nele" string, as this used to be, can only
+          # ever render in one weight. Fixed by splitting into two separate, independently
+          # styled TextLabels, both linked to the peak icon via the SAME
+          # Label::setRelative() mechanism PointStyleBuilder already uses for icon+text
+          # (see the new "text2:" block below and PointStyleBuilder::addFeature /
+          # TextStyleBuilder::applySecondaryTextRule) -- siblings of one another, not a
+          # 3-level icon->name->elevation chain, since TextLabel::applyAnchor only ever
+          # resolves one level of `m_relative` (would need new chain-walking code to go
+          # deeper). The elevation label is manually pushed further along its anchor
+          # direction by the name label's own *measured* height (read back from the
+          # already-built primary label) so it stacks below/above/beside it instead of
+          # sitting on top of it, and is marked `optional` so a placement failure only
+          # drops the elevation line rather than taking the peak's name down with it.
           text:
             text_source: |
               function() {
                   var name = global.show_name_en && feature.name_en ? feature.name_en : feature.name;
-                  const ele = global.metric_units ? feature.ele : feature.ele*3.2808399;
-                  if(!name) { return ele.toFixed(0); }
+                  if(!name) {
+                      const ele = global.metric_units ? feature.ele : feature.ele*3.2808399;
+                      return ele.toFixed(0);
+                  }
                   if(name.slice(-9) == " Mountain") { name = name.slice(0, -9) + " Mt."; }
                   else if(name.slice(0, 6) == "Mount ") { name = "Mt. " + name.slice(6); }
-                  return name + "\n" + ele.toFixed(0);
+                  return name;
               }
             text_wrap: 100
             font:
               family: IBM Plex Sans Condensed
               weight: 600
-              size: 9.5px
+              size: 12px
+          text2:
+            text_source: |
+              function() {
+                  // Elevation-only sub-label, lighter weight than the name. Skip it when
+                  // there's no name: the primary label above already falls back to
+                  // showing the elevation by itself in that case, so a second identical
+                  // number would just duplicate it.
+                  var name = global.show_name_en && feature.name_en ? feature.name_en : feature.name;
+                  if(!name) { return ""; }
+                  const ele = global.metric_units ? feature.ele : feature.ele*3.2808399;
+                  return ele.toFixed(0);
+              }
+            font:
+              family: IBM Plex Sans Condensed
+              weight: 400
+              size: 11px
 
     saddle:
       exclusive: true
