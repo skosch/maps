@@ -39,7 +39,12 @@ global:
     civic: "#D9CFC3"
     military: "#EADCD7"
     water: "#9dc3de" # == hsl(205, 50%, 74%) (compare ferry color)
-    water_name: "#51909c"
+    # dark-blue "as is tradition" for water labels (was muted teal #51909c).
+    # candidates (pick by eye against actual water fill #9dc3de):
+    #   #1a3c5e - deep navy/slate, most subdued, closest to "ink" blue
+    #   #2b4c7e - richer indigo-blue, good legibility/tradition balance (ACTIVE)
+    #   #1f4e79 - classic saturated cartographic navy (USGS-topo-ish), most assertive
+    water_name: "#2b4c7e"
     water_halo: "#e2eef0"
     water_tunnel: hsl(205, 72%, 86%)
     glacier_name: "#3A88BB"
@@ -461,6 +466,13 @@ fonts:
       url: /home/sebastian/.fonts/IBM-Plex-Sans/IBMPlexSans-Italic.otf
     - weight: 600
       url: /home/sebastian/.fonts/IBM-Plex-Sans/IBMPlexSans-SemiBoldItalic.otf
+  IBM Plex Sans Condensed:
+    - weight: 600
+      url: ../shared/fonts/IBMPlexSans_Condensed-SemiBold.ttf
+  IBM Plex Serif:
+    - weight: 400
+      style: italic
+      url: ../shared/fonts/IBMPlexSerif-Italic.otf
 
 scene:
   background:
@@ -850,7 +862,7 @@ layers:
         transition: { show: { time: 0s }, hide: { time: 1s } }
         priority: global.priority.water
         font:
-          family: global.primary_font
+          family: IBM Plex Serif
           fill: global.color.water_name
           stroke: { color: global.color.water_halo, width: 2 }
           style: italic
@@ -903,7 +915,7 @@ layers:
         priority: global.priority.waterway
         #buffer: 3px
         font:
-          family: global.primary_font
+          family: IBM Plex Serif
           fill: global.color.water_name
           stroke: { color: global.color.water_halo, width: 2 }
           style: italic
@@ -1794,14 +1806,13 @@ layers:
                   if(!name) { return ele.toFixed(0); }
                   if(name.slice(-9) == " Mountain") { name = name.slice(0, -9) + " Mt."; }
                   else if(name.slice(0, 6) == "Mount ") { name = "Mt. " + name.slice(6); }
-                  if(name.length > 18) { name = name.substring(0, 17) + "…"; }
                   return name + "\n" + ele.toFixed(0);
               }
             text_wrap: 100
-            max_lines: 2
             font:
-              style: italic
-              size: 10.67px
+              family: IBM Plex Sans Condensed
+              weight: 600
+              size: 9.5px
 
     saddle:
       exclusive: true
@@ -1876,6 +1887,7 @@ layers:
           text:
             priority: global.priority.water
             font:
+              family: IBM Plex Serif
               size: 11px
               fill: global.color.water_name
               stroke: { color: global.color.water_halo, width: 3 }
