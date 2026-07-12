@@ -12,6 +12,7 @@
 #include "util/elevationManager.h"
 #include "data/rasterSource.h"
 #include "debug/frameInfo.h"
+#include "debug/profiler.h"
 
 #include "touchhandler.h"
 #include "bookmarks.h"
@@ -830,6 +831,7 @@ void MapsApp::sendMapEvent(MapEvent_t event)
 
 void MapsApp::mapUpdate(double time)
 {
+  PROFILE_SCOPE("MapUpdate");
   static double lastFrameTime = 0;
 
   // handle scene completion ourselves to perform necessary setup before first update
@@ -1300,6 +1302,32 @@ std::string MapsApp::distKmToStr(double dist, int prec, int sigdig)
   if(dist < 0.1 || (dist < 1 && prec > 1))
     return fstring("%.0f m", dist*1000);
   return fstring("%.*f km", prec, dist);
+}
+
+void MapsApp::toggleProfilerCapture()
+{
+  using namespace Tangram;
+  static std::string tracePath;
+  if(Profiler::isCapturing()) {
+    Profiler::stopCapture();
+    LOGW("Profiler trace written to %s", tracePath.c_str());
+    return;
+  }
+  FSPath profDir(baseDir, "profiles/");
+  if(!profDir.exists() && !createPath(profDir)) {
+    LOGE("Profiler: unable to create %s", profDir.c_str());
+    return;
+  }
+  char timestr[32];
+  time_t now = time(NULL);
+  strftime(timestr, sizeof(timestr), "%Y%m%d-%H%M%S", localtime(&now));
+  tracePath = profDir.child(::fstring("trace-%s.json", timestr)).path;
+  Profiler::startCapture(tracePath);
+  Profiler::meta("version", versionStr);
+  auto campos = map->getCameraPosition();
+  Profiler::meta("camera", ::fstring("lng=%.6f lat=%.6f zoom=%.3f rot=%.1fdeg tilt=%.1fdeg",
+      campos.longitude, campos.latitude, campos.zoom, campos.rotation*180/M_PI, campos.tilt*180/M_PI));
+  LOGW("Profiler capture started: %s", tracePath.c_str());
 }
 
 void MapsApp::dumpTileContents(float x, float y)
@@ -1799,6 +1827,13 @@ void MapsApp::createGUI(SDL_Window* sdlWin)
       LOGW("Scene YAML dumped to %s", filename.c_str());
     });
     appDebugMenu->addItem("Print JS stats", [this](){ dumpJSStats(map->getScene()); });
+    Button* profilerCb = createCheckBoxMenuItem("Profiler capture");
+    profilerCb->setChecked(Tangram::Profiler::isCapturing());
+    profilerCb->onClicked = [=](){
+      toggleProfilerCapture();
+      profilerCb->setChecked(Tangram::Profiler::isCapturing());
+    };
+    appDebugMenu->addItem(profilerCb);
     appDebugMenu->addItem("Set location", setLocFn);
     overflowMenu->addSubmenu("App debug", appDebugMenu);
   }

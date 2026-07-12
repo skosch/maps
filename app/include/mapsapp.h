@@ -150,6 +150,7 @@ public:
   Widget* createMapPanel(Toolbar* header, Widget* content, Widget* fixedContent = NULL, bool canMinimize = true);
   void addPlaceInfo(const char* icon, const char* title, const char* value);
   void dumpTileContents(float x, float y);
+  void toggleProfilerCapture();
   bool drawFrame(int fbWidth, int fbHeight);
   void setDpi(float dpi);
   Button* addUndeleteItem(const std::string& title, const SvgNode* icon, std::function<void()> callback);

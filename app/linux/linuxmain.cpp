@@ -1,10 +1,12 @@
 #include <unistd.h>  // for symlink()
+#include <ctime>
 #include "ugui/svggui_platform.h"
 #include "ugui/svggui.h"
 #include "usvg/svgwriter.h"
 
 #include "mapsapp.h"
 #include "linuxPlatform.h"
+#include "debug/profiler.h"
 #include "util/yamlPath.h"
 #include "util/elevationManager.h"
 #include "util.h"
@@ -1134,8 +1136,15 @@ int main(int argc, char* argv[])
       takeScreenshot = false;
     }
 
-    if(didDraw)
+    if(didDraw) {
       glXSwapBuffers(xDpy, xWin);
+      if(Tangram::Profiler::isCapturing()) {
+        // scenario counters so the summarizer can segment frames by view state
+        Tangram::Profiler::counter("zoom", app->map->getZoom());
+        Tangram::Profiler::counter("pitchDeg", app->map->getTilt()*180/M_PI);
+      }
+      Tangram::Profiler::frameMark();
+    }
     if(SvgGui::debugLayout) {
       FileStream strm("debug_layout.svg", "wb");
       SvgWriter::DEBUG_CSS_STYLE = true;
