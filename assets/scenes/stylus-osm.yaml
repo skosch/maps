@@ -52,7 +52,8 @@ global:
     hot_spring: orange
     beach: "#FEEFC3" #[1.000,0.953,0.900]
     ice: "#DDECEC"
-    rock: "#F5F0E5"
+    rock: "#E1D9D1"
+    scree: "#F5F0E5"
     road: "#fff"
     casing_16: "#999"
     casing_18: "#aaa"
@@ -617,8 +618,11 @@ layers:
       filter: [{ natural: glacier }]
       draw: { polygons: { visible: true, color: global.color.ice } }
     rock:
-      filter: [{ natural: [bare_rock, scree] }]
+      filter: [{ natural: [bare_rock] }]
       draw: { polygons: { visible: true, color: global.color.rock } }
+    scree:
+      filter: [{ natural: [scree] }]
+      draw: { polygons: { visible: true, color: global.color.scree } }
     farmland:
       filter:
         landuse:
@@ -1908,11 +1912,25 @@ layers:
           # TextStyleBuilder::applySecondaryTextRule) -- siblings of one another, not a
           # 3-level icon->name->elevation chain, since TextLabel::applyAnchor only ever
           # resolves one level of `m_relative` (would need new chain-walking code to go
-          # deeper). The elevation label is manually pushed further along its anchor
-          # direction by the name label's own *measured* height (read back from the
-          # already-built primary label) so it stacks below/above/beside it instead of
-          # sitting on top of it, and is marked `optional` so a placement failure only
-          # drops the elevation line rather than taking the peak's name down with it.
+          # deeper). The elevation label is PINNED to a fixed `bottom` anchor (not the
+          # name label's salience-ordered anchor list) and manually pushed straight down
+          # by the name label's own *measured* height (read back from the already-built
+          # primary label) plus a small gap, so it sits below the name instead of
+          # overlapping it, and is marked `optional` so a placement failure only drops
+          # the elevation line rather than taking the peak's name down with it. Fixed
+          # (not salience-ordered) anchor was a deliberate correction after a real bug:
+          # an earlier version called salienceOrderedAnchors() separately for this label
+          # (using its own smaller footprint) and derived the push direction from
+          # *that* result -- since the name label and this label cycle anchors
+          # independently at runtime on collision (LabelManager::handleOcclusions calls
+          # Label::nextAnchor() per-label), the two directions could silently disagree,
+          # leaving this label stacked exactly on top of the name and permanently losing
+          # that collision. A single shared, fixed anchor avoids the mismatch entirely;
+          # the tradeoff is the elevation line doesn't rotate away from clutter (water/
+          # trail/other labels) the way the name label does -- acceptable since it's
+          # optional and simply won't show in that case, same as any other dense-terrain
+          # collision loss (confirmed via headless screenshots this is a real, expected
+          # occurrence in contour-line-dense alpine terrain, not unique to this label).
           text:
             text_source: |
               function() {
@@ -1945,7 +1963,7 @@ layers:
             font:
               family: IBM Plex Sans Condensed
               weight: 400
-              size: 11px
+              size: 9px
 
     saddle:
       exclusive: true
