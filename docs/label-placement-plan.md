@@ -528,6 +528,151 @@ font sizing, halo thresholds, prominence ranking, anchor placement, and curve qu
 still Sebastian's to do (per Phase 5 of `texture-shading-plan.md`'s precedent, this is not
 an agent judgment call). Not merged to `master`, not pushed.
 
+## Phase 7 — Four follow-up items (2026-07-12 through 2026-07-15, on `master` directly)
+
+Implemented directly on `master` (per this round's instructions, no worktree/branch), one
+commit per logical change in both the outer repo and the `tangram-es` submodule. All four
+items below are done and committed; `make -f tests.mk` (2025 assertions/184 cases) and full
+`make` pass after every commit.
+
+### 1. Elevation number in regular weight
+
+The text pipeline has no per-line/per-glyph-run font override anywhere (confirmed:
+`FontContext::layoutText` shapes an entire label's text, including embedded `\n`, with one
+`alfons::Font`; `TextStyle::Parameters`/`DrawRuleData::params` hold exactly one font per
+rule) — so the original single combined `"name\nele"` string could only ever render in one
+weight. Fixed by splitting into two separate `TextLabel`s, both linked to the peak icon via
+`Label::setRelative()` (the same mechanism `PointStyleBuilder` already uses for icon+text) —
+siblings of one another, not a 3-level icon→name→elevation chain, since
+`TextLabel::applyAnchor()` only ever resolves one level of `m_relative`. New machinery: a
+`text2_*` style param family (`text2_source`/`text2_font_family`/`text2_font_weight`/
+`text2_font_size`) and `TextStyleBuilder::applySecondaryTextRule()`/
+`PointStyleBuilder::addFeature()` support for building the second label. The elevation label
+is pinned to a fixed `bottom` anchor (not independently salience-ordered) and pushed
+straight down by the *primary label's actual measured height* plus a small gap.
+
+Two real bugs found and fixed via headless testing, both worth remembering:
+- `StyleContext::evalStyle()`'s JS-function string-result dispatch special-cases
+  `text_source`/`text_source_left`/`text_source_right` to store the JS return value as
+  literal text; any other key falls through to `StyleParam::parseString()`, which for
+  text-source-shaped keys treats the string as a *feature property name to look up*, not
+  literal text. `text2_source` was missing from that list — every secondary label silently
+  rendered as empty text (a doomed `_props.getAsString("1548")` lookup) until this was added
+  to both the string- and number-result switches.
+- The push distance separating the two labels used *half* the primary label's measured
+  extent instead of the full extent: `TextLabel::applyAnchor()` already centers a label a
+  half-extent beyond its relative, so two same-relative siblings with no push start at the
+  exact same near edge and fully overlap; clearing the primary's far edge needs the full
+  extent, not half.
+
+Verified via headless screenshots (temporary "E" prefix marker to unambiguously distinguish
+the sub-label from any primary-label elevation-only fallback) showing the sub-label
+correctly stacked below several real peak names in cached Lions/Cypress-area terrain.
+**Needs Sebastian's visual sign-off**: final weight/size (currently 400/9px vs. the name's
+600/12px — the 12px reflects a live edit Sebastian made to the scene file while this was
+being debugged, not this session's original 9.5px).
+
+### 2. Circular dot instead of triangle for peak icons
+
+`assets/scenes/img/pois.svg`'s `peak` sprite: triangle path replaced with `<circle r="9"/>`
+in the sprite's `-25..25` viewBox, matching the plain-dot style already used elsewhere in
+the same file (e.g. `capital`). Screenshot-checked against the `14px` `points:` size on the
+peak draw rule; radius picked by eye, **needs Sebastian's sign-off** like any other icon
+sizing call in this project.
+
+### 3. Sufficiently prominent peaks stay visible below z12 and near neighbors
+
+Two structural gaps, both real (not threshold tweaks):
+
+- **The peak filter's z12 exemption couldn't see the texture-shading prominence proxy**
+  (only real OSM `prominence`/`wikipedia` tags, both synchronously available at tile-build
+  time). Added a cheap, synchronous stand-in as a third `any:` branch: a JS predicate
+  `feature.ele >= global.peak_prominence_ele_min` (default 2200m). This only affects
+  *candidacy* — a peak that clears this bar still goes through the normal priority
+  (`priority_texture_shading`, Phase 2) and collision pipeline; it just isn't permanently
+  excluded from ever becoming a candidate below z12. `peak_prominence_ele_min` is exposed
+  live via `gui_variables` (numeric spinner in the app's Map Variables panel, using the
+  existing `min`/`max`/`step` → `createTextSpinBox` path in
+  `MapsSources::populateSceneVars`, which already supports numeric globals alongside the
+  boolean-checkbox and per-style-shader-uniform cases it was previously used for) — changing
+  it calls `map->updateGlobals(...)` and rebuilds tiles, exactly like the existing
+  `show_trails`-style boolean toggles.
+- **`LabelCollider::process()` (tile-build time, `TileWorker` thread) permanently kills
+  same-repeatGroup peak icons within `repeat_distance` of each other using *provisional*
+  (pre-refinement) priority** — pure elevation for peaks without a real prominence tag,
+  since `Label::refinePriority()`'s texture-shading correction only runs later, on the main
+  thread. All peaks in the `peak:` draw rule share one implicit `repeatGroup` (same rule →
+  same `DrawRule::getParamSetHash()`) and a default `repeat_distance` of a full tile width —
+  a much larger radius on screen than the visual spacing between distinct real summits, so a
+  locally-prominent-but-lower peak could lose this early, permanent cut to a
+  taller-but-unremarkable neighbor before texture-shading refinement ever got a chance.
+  Fixed by explicitly setting `repeat_distance: 40px` on the peak `points:` draw rule — tight
+  enough to still dedupe genuinely-coincident sprite clutter without catching pairs of real,
+  distinct peaks. (The alternative sketched in the original prompt — deferring/re-running
+  the repeat-group cut after refinement — would be a materially bigger change touching
+  `LabelManager`'s main-thread pass; not attempted, since shrinking `repeat_distance` closes
+  the practical gap without it.)
+
+New unit test (`tests/unit/labelTests.cpp`, "LabelCollider repeat-group suppression radius
+tracks repeatDistance") locks down that `LabelCollider::process()`'s normal per-tile code
+path (not the separate `>4096`-labels pre-filter, which uses a different, `/10`-scaled
+formula) really does use `Options::repeatDistance` directly as the suppression radius in
+screen pixels — the invariant the `repeat_distance: 40px` fix relies on.
+
+**No concrete real-world before/after pair found** (unlike Phase 2's "Zinc"/"East Zinc"
+precedent) — this session's cached test terrain (Lions/Cypress/Enchantment area) didn't
+surface an obvious close-together low-prominence/high-elevation pair to screenshot. The fix
+is verified structurally (the new unit test) and via confirming the scene still loads and
+renders correctly, not a visual A/B. **`peak_prominence_ele_min` (2200m) and
+`repeat_distance` (40px) both need Sebastian's own visual judgment** — reasoned from typical
+peak spacing/elevation in this dataset, not tuned against a specific screenshot comparison.
+
+### 4. Labels default away from covering high-prominence ridges
+
+The deferred Phase 3 item. Phase 3's `anchorCandidateCost()` (`textStyleBuilder.cpp`)
+documented texture-shading-based ridge avoidance as architecturally impossible at
+tile-build time (main-thread-only sampler, `TileWorker`-thread caller) and left it as a
+permanent limitation, not a stub awaiting wiring. It turned out not to be permanent — the
+same main-thread deferral Phase 2 already established for priority refinement applies just
+as well to anchor choice.
+
+New `Label::refineAnchor()`, called from `LabelManager::processLabelUpdate()` right next to
+`refinePriority()`, same "retry every frame until the elevation mosaic is available, then do
+it once" pattern (new `Label::m_anchorRefined` flag mirrors `m_prominenceRefined`). Samples
+texture-shading at a **fixed 25m real-world radius** around each candidate anchor direction
+— Phase 3's screen-space footprint math doesn't carry over here, since this runs at
+whatever the *current* view zoom/tilt happens to be, not the tile's fixed build-time styling
+zoom, so there's no single "footprint in world meters" conversion. Cost is distance from the
+texture-shading formula's neutral value 0.5 (gentle slopes read near-neutral either
+direction; ridges/canyons push away from it) — lower cost is gentler ground. If a materially
+better anchor exists (margin: 0.08), it's rotated to the front of the anchor fallback list
+and switched to immediately via `Label::setAnchorIndex(0)`; the normal per-frame
+`LabelManager::handleOcclusions()` collision pass that runs right after re-validates the new
+position exactly like any other anchor and falls back further via `Label::nextAnchor()` on
+its own if it turns out to newly collide with something — **no changes needed to
+`handleOcclusions()`/`nextAnchor()`**, matching Phase 3's own "if you find yourself modifying
+`handleOcclusions`, stop and reconsider" guidance.
+
+The switch-or-not decision is factored out into a pure, directly-unit-tested function,
+`Label::pickBetterAnchorIndex()` (`tests/unit/labelTests.cpp`) — the sampling itself needs a
+real `ElevationManager`/`RasterSource`, too heavy to construct in a unit test, the same
+reasoning the Frozen Interface Contract above gives for keeping `sampleTextureShadingAtMosaic()`
+separately testable from `ElevationManager`'s GL/render-state machinery.
+
+New `text_anchor_texture_shading` style param (`text:anchor_texture_shading: true` in YAML)
+opts a text label in; wired only onto the peak name label (not the Task 1 elevation
+sub-label, which uses a fixed anchor for unrelated reasons — see Task 1 above).
+
+**Verification is weaker than the other three items and should be treated as directional,
+not conclusive**: confirmed the scene loads with no shader/GL/parse errors and a tilted 3D
+headless screenshot over real steep terrain (Lions/Cypress-area ridges) shows peak labels
+sitting in lighter, less-shaded ground rather than stamped across the dark ridge/drainage
+fan nearby — but this is not a rigorous disable/enable A/B on the same peak (would need
+another full build+screenshot cycle this session didn't have remaining budget for after the
+Task 1 debugging took much longer than expected). **The 25m sampling radius and 0.08
+minimum-improvement threshold need Sebastian's own visual judgment** — reasoned from typical
+peak-label scale, not tuned against a specific before/after comparison.
+
 ## Verification approach
 
 - Each phase: project builds clean (`make`, Release), relevant unit tests pass
