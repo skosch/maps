@@ -1991,6 +1991,17 @@ layers:
                   return name;
               }
             text_wrap: 100
+            # docs/label-placement-plan.md Task 4: steer this label's anchor away from a
+            # strong ridge/canyon texture-shading response, main-thread only, once the
+            # elevation mosaic is available at this peak's position (Label::refineAnchor(),
+            # called from LabelManager::processLabelUpdate next to refinePriority() above) --
+            # mirrors that same "can't run at tile-build time on a TileWorker thread, so
+            # refine later on the main thread" pattern, this time for anchor choice instead
+            # of priority. This is the ridge-avoidance term Phase 3's anchorCandidateCost()
+            # (textStyleBuilder.cpp) left as a documented, permanent limitation for -- it
+            # turned out not to be permanent, just needing the same main-thread deferral
+            # Phase 2 already established for priority.
+            anchor_texture_shading: true
             font:
               family: IBM Plex Sans Condensed
               weight: 600
