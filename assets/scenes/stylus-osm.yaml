@@ -19,20 +19,21 @@ global:
   primary_font: IBM Plex Sans
   bold_weight: 600 # use instead of "bold" to avoid checking for OS font if we only have semibold
 
-  # docs/label-placement-plan.md Task 3: the peak filter's z12 visibility gate can only be
+  # docs/label-placement-plan.md Task 3 (revised 2026-07-15): peak label SALIENCE (does this
+  # peak look spiky/prominent from far away) is decided entirely by texture shading, never
+  # by elevation -- see priority: on the peak draw rule for the actual ranking mechanism.
+  # This value is a completely different thing: a CANDIDACY floor, existing only to bound
+  # how many below-z12 peak candidates get built per tile (every real peak on Earth would
+  # otherwise qualify, including countless unremarkable OSM nodes) -- not a claim that
+  # taller peaks are more salient. The peak filter's z12 visibility gate can only be
   # exempted by signals available synchronously at tile-build time (real OSM `prominence`/
-  # `wikipedia` tags) -- the CPU texture-shading prominence *proxy* doesn't exist yet at
-  # that point (see textureShading.h's threading note), so it structurally cannot gate
-  # candidacy. Elevation is used instead as a cheap, synchronous, correlated-but-imperfect
-  # stand-in: a peak at or above this height becomes a label *candidate* below z12 even
-  # without a real prominence/wikipedia tag, so it can reach Label::refinePriority() and
-  # have its priority corrected by the real texture-shading proxy once the elevation mosaic
-  # is available -- accepting that more candidates get built (and then sorted out by
-  # priority + collision) as the cost of not permanently excluding a genuinely prominent
-  # peak that merely lacks OSM metadata. Tuned by eye -- exposed live via gui_variables
-  # (App menu > Map Variables) since "how many below-z12 unlabeled peaks show up" is very
-  # much a visual judgment call, not something to get right from first principles.
-  peak_prominence_ele_min: 2200
+  # `wikipedia` tags, or this floor); the CPU texture-shading prominence proxy doesn't exist
+  # yet at that point (see textureShading.h's threading note), so it structurally cannot
+  # gate candidacy -- only ranking, later, once a peak already IS a candidate. Set low
+  # deliberately (most named summits worldwide clear it) so it essentially never excludes a
+  # real candidate; tuned for candidate-pool size/performance, not for "quality," and
+  # exposed live via gui_variables (App menu > Map Variables) for exactly that reason.
+  peak_candidacy_ele_floor: 500
 
   # HSL: 0 (== 360) is red, 120 is green, 240 is blue
   color:
@@ -425,13 +426,13 @@ application:
     show_transit: { label: Transit }
     show_parking: { label: Parking }
     #show_motorways: { label: Motorways }
-    # docs/label-placement-plan.md Task 3: elevation-based candidacy gate for peaks below
-    # z12 that lack a real OSM prominence/wikipedia tag -- see the comment on the global
-    # itself for the full rationale.
-    peak_prominence_ele_min:
-      label: Peak Candidacy Min Elevation (m)
+    # docs/label-placement-plan.md Task 3: candidate-pool-size floor for peaks below z12
+    # that lack a real OSM prominence/wikipedia tag -- NOT a salience/prominence signal,
+    # see the comment on the global itself for the full rationale.
+    peak_candidacy_ele_floor:
+      label: Peak Candidacy Pool Floor (m, NOT a prominence signal)
       min: 0
-      max: 5000
+      max: 3000
       step: 50
 
   # specify fields indexed for search and filter to select indexed features
@@ -1892,20 +1893,35 @@ layers:
         natural: [peak, volcano]
         ele: { min: 1 }
         all:
-          # docs/label-placement-plan.md Task 3: a peak below z12 becomes a label
-          # candidate if it has a real OSM prominence/wikipedia tag OR (new) is tall
-          # enough per peak_prominence_ele_min -- a cheap, synchronous proxy standing in
-          # for the CPU texture-shading prominence proxy, which isn't available yet at
-          # this point (see textureShading.h/the global's own comment). This only
-          # controls *candidacy*; final visibility is still decided by priority
-          # (priority_texture_shading below) and collision, same as any other peak.
+          # docs/label-placement-plan.md Task 3 (revised after user feedback 2026-07-15:
+          # the original version of this comment described peak_prominence_ele_min as a
+          # "prominence proxy" gating candidacy -- that was wrong and is NOT what this does
+          # anymore; see the corrected explanation below).
+          #
+          # A peak below z12 becomes a label CANDIDATE if it has a real OSM prominence/
+          # wikipedia tag, OR is at or above global.peak_candidacy_ele_floor. That floor is
+          # NOT a prominence signal and must never be read as "taller = more likely to be
+          # labeled" -- it exists purely to bound how many candidates get built per tile for
+          # performance (every real peak on Earth would otherwise become a below-z12
+          # candidate, including countless unremarkable bumps with an OSM node), set low
+          # enough that it essentially never excludes a genuinely prominent peak (most named
+          # summits worldwide clear it) -- see the global's own comment for the full
+          # reasoning and why elevation can't be a real gate here at all.
+          #
+          # Actual salience selection happens entirely via PRIORITY + collision, below:
+          # peaks without a real prominence tag get a deliberately bad PROVISIONAL priority
+          # (worse than anything else on the map) so they display *nothing* until
+          # Label::refinePriority() confirms real texture-shading prominence, on the main
+          # thread, once the elevation mosaic loads -- see the priority: function below and
+          # its comment for the full mechanism. This is what actually answers "does this
+          # peak look spiky/salient from far away" -- not this filter.
           - any:
               # Block (dash-per-item) list, not a flow `[...]` sequence, so the JS
               # function's literal `{`/`}` can't be mistaken for YAML flow-mapping
               # syntax.
               - { wikipedia: true }
               - { prominence: true }
-              - function() { return feature.ele >= global.peak_prominence_ele_min; }
+              - function() { return feature.ele >= global.peak_candidacy_ele_floor; }
               - { $zoom: { min: 12 } }
           # not show_trails: named peaks from z15, all from z17
           - any: [{ $zoom: { min: 17 } }, global.show_trails]
@@ -1930,20 +1946,31 @@ layers:
           # real, distinct peaks -- tuned by eye, needs Sebastian's visual sign-off like any
           # other spacing/threshold constant in this file.
           repeat_distance: 40px
-          # docs/label-placement-plan.md Phase 2: real OSM prominence tag wins outright when
-          # present (Math.sqrt-compressed into the fractional part, same idiom as place_fn
-          # above); otherwise fall back to today's pure-elevation weighting as a *provisional*
-          # priority and ask LabelManager to refine it on the main thread using the CPU
-          # texture-shading sampler once the elevation mosaic is available at this peak's
-          # position (priority_texture_shading below) -- the texture-shading term can't safely
-          # run here, at tile-build time, since this function executes on a TileWorker thread
-          # and the elevation raster mosaic is main-thread-only (see textureShading.h).
+          # docs/label-placement-plan.md Phase 2/Task 3 (revised 2026-07-15): real OSM
+          # prominence tag wins outright when present (Math.sqrt-compressed into the
+          # fractional part, same idiom as place_fn above). Otherwise -- this is the fix for
+          # user-reported feedback that peak salience must come from texture shading, NEVER
+          # elevation -- this peak gets a deliberately WORST-IN-TIER provisional priority
+          # (fixed 0.999 fraction, not elevation-weighted: elevation is not a salience signal
+          # and must not influence ranking even provisionally) so it displays *nothing* until
+          # LabelManager refines it on the main thread using the CPU texture-shading sampler,
+          # once the elevation mosaic is available at this peak's position
+          # (priority_texture_shading below) -- the texture-shading term can't safely run
+          # here, at tile-build time, since this function executes on a TileWorker thread and
+          # the elevation raster mosaic is main-thread-only (see textureShading.h).
+          # Label::refinePriority() replaces the fractional part with a texture-shading-
+          # derived one (floor(priority) is preserved, which is why 0.999 -- not some larger
+          # offset -- keeps this in the same integer tier as global.priority.peak, letting the
+          # refined value land correctly back in that tier once genuine prominence is known).
+          # A peak that's never refined (e.g. no terrain data for this map style) simply never
+          # outranks anything -- an acceptable, expected steady state, not a bug (mirrors
+          # Phase 2's original fallback contract).
           priority: |
             function() {
                 if (feature.prominence) {
                     return global.priority.peak - Math.round(Math.sqrt(Math.min(1, feature.prominence/3000)) * 4096)/65536;
                 }
-                return global.priority.peak + (1 - feature.ele/16384.0);
+                return global.priority.peak + 0.999;
             }
           priority_texture_shading: true
           # docs/label-placement-plan.md Task 1: name (semibold) + elevation (regular) in

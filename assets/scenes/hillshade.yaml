@@ -81,6 +81,16 @@ application:
             min: 0
             max: 1
             step: 0.05
+        # docs/label-placement-plan.md Phase 7 follow-up: raw texture-shading debug view (see
+        # the uniform's own comment further down). 0/1 spinbox, not a real checkbox -- style-
+        # uniform gui_variables only support the numeric spinbox widget today
+        # (MapsSources::processUniformVar).
+        u_texture_shading_debug:
+            style: hillshade
+            label: Texture Shading Debug View
+            min: 0
+            max: 1
+            step: 1
         # Tilted-view counterpart of the slider above (docs/terrain-lighting-v2-plan.md,
         #  "Second revision: texture shading invisible at tilt"): the 2D whole-color ts
         #  multiply/tint deliberately fades OUT at tilt (see ts_op in the color block), and
@@ -427,6 +437,15 @@ styles:
                 u_texture_shading_levels: 5
                 u_texture_shading_scale: 1.25
                 u_texture_shading_blend: 1.0
+                # docs/label-placement-plan.md Phase 7 follow-up: debug visualization of the
+                # RAW texture-shading signal (ts_shade, pre-blend, pre-lighting) as flat
+                # grayscale -- 0 = valley/canyon, 0.5 = flat/neutral, 1 = ridge/summit. Lets
+                # Sebastian visually confirm the exact same CPU-sampled signal
+                # (sampleTextureShading(), used for peak priority/anchor refinement) that's
+                # driving label placement, independent of how it's tinted/blended into the
+                # normal hillshade look. See the color block's `if (u_texture_shading_debug ...)`
+                # early-out below.
+                u_texture_shading_debug: 0.0
                 # Unified tilt-parameterized terrain luminance knobs (docs/terrain-lighting-v2-
                 #  plan.md Phase 2; see the color block's HILLSHADE_BLEND_OVER branch): these are
                 #  the values the model interpolates TOWARD as tilt_morph -> 1 (full 45 deg
@@ -1051,6 +1070,13 @@ styles:
                     //  otherwise be nearly transparent
                     color.a = max(color.a, ts_w);
                     #endif
+                    // Debug visualization (see u_texture_shading_debug's own comment above): show
+                    //  the RAW ts_shade value as flat grayscale, completely bypassing the tint/
+                    //  multiply blend and base hillshade color above -- what you see here is
+                    //  exactly the CPU sampleTextureShading() signal driving peak label placement.
+                    if (u_texture_shading_debug > 0.5) {
+                        color = vec4(vec3(ts_shade), 1.0);
+                    }
                     #endif
                     // prevent duplicate call to calculateLighting()
                     #undef TANGRAM_LIGHTING_FRAGMENT
