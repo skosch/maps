@@ -1923,9 +1923,28 @@ layers:
               - { prominence: true }
               - function() { return feature.ele >= global.peak_candidacy_ele_floor; }
               - { $zoom: { min: 12 } }
-          # not show_trails: named peaks from z15, all from z17
-          - any: [{ $zoom: { min: 17 } }, global.show_trails]
-          - any: [{ $zoom: { min: 15 } }, { name: true }]
+          # REMOVED 2026-07-16 (real bug, found via user report "many peaks aren't showing
+          # at all unless super zoomed in, even with no other peaks around"): this used to
+          # be `all: [ any: [{$zoom:{min:17}}, global.show_trails], any: [{$zoom:{min:15}},
+          # {name:true}] ]` -- two SEPARATE any: blocks under `all:`, i.e. ANDed together,
+          # not the single OR the neighboring comment ("named peaks from z15, all from
+          # z17") actually described. Expanding the boolean algebra: (zoom>=17 OR
+          # show_trails) AND (zoom>=15 OR name) reduces to zoom>=17 OR (show_trails AND
+          # (zoom>=15 OR name)) -- with global.show_trails defaulting to false (see its own
+          # definition above), that's just "zoom>=17", full stop, for every peak on the
+          # default (non-Hike) map style, regardless of name/prominence/how empty the
+          # surrounding area is. Confirmed via headless screenshot: identical view, same
+          # peaks, same zoom -- 5+ named peaks with elevations under stylus-bike-hike
+          # (show_trails: true), zero peaks of any kind under the default stylus-osm-terrain
+          # source. This predates the current texture-shading candidacy/priority system
+          # above (it was a leftover simple zoom-tier heuristic from before that existed),
+          # and directly defeated this whole project's point: peaks are already gated by
+          # the OR-candidacy filter just above and by priority + collision (refined from
+          # real texture-shading prominence, see the priority: function below) -- that's
+          # the intended sole salience gate per this rule's own comment ("Actual salience
+          # selection happens entirely via PRIORITY + collision"), so a second, blunt,
+          # zoom>=17-in-practice gate on top of it was both redundant and the actual reason
+          # peaks were invisible at any normal browsing zoom.
       draw:
         points:
           sprite: peak
