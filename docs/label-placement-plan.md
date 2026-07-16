@@ -1030,6 +1030,58 @@ needs its own main-thread-safe lookup path, likely amortized/cached since it's m
 expensive than the existing single-tile mosaic lookup), and its own visual tuning pass --
 not attempted in this round.
 
+## Phase 7 follow-up round 5 (2026-07-16): icon gating, distance consistency, tile-build cut
+
+Sebastian, one message, three issues:
+
+1. "peak dots shouldn't be shown unless at least an elevation number is shown next to it,
+   or an elevation AND a name." **Fixed** (`tangram-es` `c55d5c478` / outer `f375b91`). The
+   icon<->text "die together" cascade (`LabelCollider::killOccludedLabels` /
+   `LabelManager::handleOcclusions`, both keyed on `Options::optional`) had the gate on the
+   wrong label: the name was non-optional (so its failure killed the icon), elevation was
+   optional (so its failure didn't) -- meaning a dot could end up alone with just a number,
+   with a name and no number, or with nothing at all. Flipped: `text:` (name) now sets
+   `optional: true`, `text2` (elevation, `pointStyleBuilder.cpp`) is now the non-optional
+   one. The icon strictly requires a successfully-placed elevation; the name is free extra
+   context that can fail independently.
+
+2. "the elevations are still too far away from the peak dots sometimes -- their distance
+   seems to be sometimes very close, sometimes quite far? how is this possible?" **Fixed**,
+   same commits. Root cause: the stack-fallback mechanism from round 3/4
+   (`setStackFallbackTarget()`/`m_stackFallbackTarget`) computed the elevation's offset from
+   the NAME's own dimension and position whenever stacking won out over an independent
+   compass anchor -- so the icon-to-elevation distance varied with the name's text
+   length/wrapping instead of being constant. Removed entirely (also closes off the second
+   use-after-free source found this session, `clearStackFallbackTargetIfEquals()`): both
+   labels now always use the identical icon-relative anchor formula (icon radius + own
+   half-extent + `anchorGapScale` gap), so the distance is the same fixed value for every
+   peak, always. "Stacked under the name" can still happen visually when both independently
+   land on vertically-adjacent anchors, but it's no longer a distinct offset-computing mode.
+
+3. "I see locations sometimes where a whole range doesn't show the label for the most
+   prominent peak; it shows maybe just one for a small foothill, but nothing for the big
+   peak until I really zoom in, with no other labels or trails interfering either." **Fixed**
+   (outer `f375b91`, `repeat_distance: 40px` -> `0` on the peak icon). Root cause: this is
+   the original Task 3 failure mode resurfacing -- `LabelCollider::process()` (tile-build
+   time, `TileWorker` thread) applies repeat-group mutual suppression using only the
+   PROVISIONAL priority (name-status + weak height tie-break, see round 4 above), since
+   texture-shading refinement is main-thread-only and doesn't exist yet at this point. Any
+   nonzero `repeat_distance` risked this crude provisional signal permanently killing
+   (`Label::State::dead`, irreversible -- never reconsidered once real refinement would have
+   ranked things correctly) the wrong one of two nearby real peaks. Worse at low zoom, where
+   real-world peak-to-peak spacing maps to fewer screen pixels -- exactly matching "shows
+   only once I zoom in a lot," and unrelated to actual label/trail clutter, matching "no
+   other labels or trails interfering." Disabled entirely; deduplicating genuinely-coincident
+   sprites (the same summit double-tagged in OSM) is left to the real per-frame OBB collision
+   pass instead, which runs after refinement with the correct, true-prominence-ranked
+   priority.
+
+Verified via headless screenshot (default map source, multiple regions): every visible dot
+now has at least an elevation number, name/elevation sit at a visually consistent distance
+from the dot across many peaks, and noticeably more named peaks survive that previously
+would have lost a tile-build-time repeat-group cut. `make -f tests.mk`: 2024 assertions/184
+cases, all passing throughout.
+
 ## Verification approach
 
 - Each phase: project builds clean (`make`, Release), relevant unit tests pass
