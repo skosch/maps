@@ -673,6 +673,143 @@ Task 1 debugging took much longer than expected). **The 25m sampling radius and 
 minimum-improvement threshold need Sebastian's own visual judgment** — reasoned from typical
 peak-label scale, not tuned against a specific before/after comparison.
 
+## Phase 7 follow-up (2026-07-15): real bugs and a real redesign, from user review
+
+Sebastian's review of Phase 7 found one real regression and two real design flaws. All
+fixed/redesigned and committed directly to `master`; `make -f tests.mk` (2024 assertions/184
+cases) and full `make` pass after every commit.
+
+### Elevation number vanished (real bug, not Task 4)
+
+Reported as "used to show, now it's gone." Root cause had nothing to do with Task 4 (the
+anchor-refinement flag was a red herring during investigation): `TextStyleBuilder::
+applySecondaryTextRule()` (Task 1) copies the primary (name) label's `Parameters` wholesale,
+which includes its `repeatGroup`/`repeatDistance` — so the elevation sub-label was
+inheriting the **exact same repeatGroup as its own name label** (and every other peak's name
+label sharing the draw rule). `LabelManager::withinRepeatDistance()` checks proximity within
+a repeatGroup with **no exemption for `isChild()`/`relative()`** (unlike the real per-anchor
+collision loop, which does skip a label's own relative) — so whenever the name label placed
+successfully nearby, which is by construction always, the elevation label got occluded
+outright by the repeat-group check, before ever reaching real collision testing. This bug
+existed since Task 1 shipped; it wasn't caught earlier because its symptom is
+order/state-dependent (only manifests when the name label *also* successfully places in the
+same frame — ad hoc testing had repeatedly observed the elevation label rendering alone,
+which was actually the bug's *other* face: the name label losing an unrelated collision and
+never reaching `m_repeatGroups`, masking the interaction). Fixed by explicitly zeroing
+`repeatDistance`/`repeatGroup` on the elevation sub-label — it isn't a competing peak
+candidate needing dedup against other same-rule labels, it's a fixed decoration of one
+already-chosen peak. Verified: name and elevation now render together reliably across many
+peaks in the same headless screenshot (confirmed via the new texture-shading debug view,
+below — nearly every peak in frame now shows both lines).
+
+### Prominence gating was still elevation-based (real design flaw)
+
+The Task 3 write-up above says "genuinely prominent peak" but the actual mechanism used
+elevation as the candidacy signal — precisely what Sebastian's review flagged as wrong (OSM
+`prominence` tags are usually missing, and raw elevation says nothing about how salient/
+spiky a peak looks; a sharp 800m peak can be far more visually prominent than a broad,
+gentle 3000m shoulder). Two changes, both keeping the same hard architectural constraint
+(the visibility filter runs on a TileWorker thread, before any tile has main-thread texture
+shading access — this has not changed and cannot change without moving filtering off that
+thread entirely, out of scope here):
+
+- `global.peak_prominence_ele_min` → renamed `peak_candidacy_ele_floor` and reframed
+  honestly: it is **not** a salience signal, only a candidate-pool-size cap (every real peak
+  on Earth would otherwise qualify as a below-z12 candidate). Lowered 2200m → 500m so it
+  essentially never excludes a real candidate.
+- The peak `priority:` function's no-real-tag branch no longer weights by elevation at all.
+  It now returns a fixed, deliberately worst-in-tier provisional priority
+  (`global.priority.peak + 0.999`) so an unconfirmed peak displays **nothing** until
+  `Label::refinePriority()` confirms real texture-shading prominence on the main thread —
+  literally "not placing labels until texture shading is computed," per the request. `0.999`
+  (not some larger offset) deliberately preserves `floor(priority) == global.priority.peak`,
+  since `refinePriority()` keeps that floor when resetting the fractional part to the
+  texture-shading value — a larger offset would have moved the peak into a different integer
+  priority tier and never let it become competitive again after refinement.
+
+New: a raw texture-shading **debug visualization** (`u_texture_shading_debug`,
+`hillshade.yaml`, live toggle via `gui_variables` → "Texture Shading Debug View") that
+replaces the entire hillshade composite with the unblended `ts_shade` value as flat
+grayscale — the literal same CPU-sampled signal driving peak priority and anchor placement,
+so it can be visually cross-checked against which peaks actually get labeled. Verified via a
+forced-on headless screenshot: the underlying relief structure is clearly visible and
+peaks with real ridge structure are what's driving the composite, not a flat elevation
+ranking.
+
+### Ridge-avoidance redesign, informed by real cartographic literature
+
+The original `Label::refineAnchor()` (25m fixed real-world sampling radius, single point per
+compass direction, texture-shading only) was reviewed and found wanting: "the integral of
+the texture-shading intensity AND feature occlusion (trails, POIs) that would result from
+placing the label, given its size and shape, at each anchor" is the actual question, and the
+default anchor order should follow established cartographic point-label placement priority
+(Imhof), not an ad hoc list. A research pass (see below) confirmed the fix direction before
+implementing it, rather than guessing.
+
+**Research findings** (full agent report retained in this session's transcript, summarized
+here): the numeric 8-position point-label ranking widely cited as "Imhof's rule" is not
+directly from Imhof (whose 1962/1975 treatment is descriptive, not a numeric ranking) — it
+was formalized by **Yoeli, P. (1972), "The Logic of Automated Map Lettering," *The
+Cartographic Journal* 9(2):99–108**, and adopted as the objective function in
+**Christensen, Marks & Shieber, "An Empirical Study of Algorithms for Point-Feature Label
+Placement," *ACM ToG* 14(3), 1995**. Ranking, best to worst: **upper-right, upper-left,
+lower-left, lower-right, right, top, left, bottom** — diagonal quadrants beat axis-centered
+sides, and top-right leads because Latin-script ascenders/reading order make a label
+above-right of a point symbol read as unambiguously attached to it. Neither CMS nor Yoeli
+address scoring against a busy/detailed basemap (their objective is label-vs-label and
+label-vs-point rectangle overlap only, no terrain/relief term). Two other papers give
+concrete, cheap-approximation patterns directly applicable here: **Luboschik, Schumann &
+Cords, "Particle-Based Labeling," IEEE TVCG 2008** (score obstacles via sample points along
+their outline/contour, not a full-area integral) and **Kittivorawong et al., "Fast and
+Flexible Overlap Detection for Chart Labeling with Occupancy Bitmap," VIS 2021** (rasterize
+into a binary occupancy bitmap, test candidate footprints via O(1) bitwise ops per row).
+Actionable synthesis used below: start from the Yoeli/CMS base rank, score relief and vector
+density by sampling a handful of points on each candidate footprint's perimeter/corners
+(not a full integral), combine as a weighted sum.
+
+**Implementation** (`Label::refineAnchor()`, `tangram-es/core/src/labels/label.cpp`):
+- Samples **both** texture-shading ridge cost and vector-feature density (via the tile's
+  `AnchorOccupancyGrid` — the same structure Phase 3's tile-build-time
+  `anchorCandidateCost()` already uses) at 5 points spread across each candidate anchor's
+  **actual footprint** (icon radius + this label's own measured `dimension()`), mirroring
+  `anchorCandidateCost()`'s own sampling pattern exactly. Footprint pixel offsets convert to
+  the tile's normalized `[0,1]` local space via `MapProjection::tileSize()` — a fixed
+  per-tile-geometry constant, not the current view's screen projection; valid to reuse here
+  because this is about relating a fixed-size label footprint to its own tile's coordinate
+  system, not to the current camera's zoom/tilt.
+- The two cost terms are combined as an equal-weighted sum (tune by eye if one term should
+  dominate) and the full anchor list is re-sorted by ascending combined cost — not just
+  "switch if meaningfully better than current," which the original version did. Since this
+  only ever runs once per label (`m_anchorRefined` guards further calls), there's no
+  per-frame flicker/churn risk to guard against, so a clean full sort is simpler and more
+  literally "sort anchors accordingly" (the actual request).
+- `TextStyleBuilder::applyRule()`'s default anchor fallback order (used when a draw rule has
+  no explicit `text_anchor`) changed from the ad hoc `{bottom, top, right, left}` to the
+  Yoeli/CMS 8-position ranking. This is only the *starting* order — both
+  `salienceOrderedAnchors()` (tile-build time) and `refineAnchor()` (main-thread) still
+  re-sort it per-label; it only matters as the base/tie-break order when neither refinement
+  runs (e.g. no terrain data for this map style).
+- The switch-decision pure helper (`Label::pickBetterAnchorIndex`) is replaced by
+  `Label::sortAnchorIndicesByCost()`, still directly unit-tested (stable-sorts a hand-built
+  cost array) without needing a real `ElevationManager`/`RasterSource`.
+
+**Not attempted, deliberately out of scope for this pass**: a true occupancy-bitmap /
+particle-contour implementation (Kittivorawong/Luboschik's actual techniques) — the
+5-point-footprint-sample approach already mirrors Phase 3's own established pattern and
+keeps the change bounded; revisit if the coarse 5-point sampling proves visually
+insufficient. Also not attempted: reading Imhof's actual 1962/1975 papers directly (not
+freely available online in this session; relied on the well-documented Yoeli/CMS
+formalization instead, which is explicitly presented in the literature as capturing Imhof's
+intent numerically).
+
+**Tunables needing Sebastian's own visual judgment**: the equal 1:1 weighting between
+texture-shading cost and vector-density cost in `refineAnchor()`'s combined score (no
+principled reason it should be exactly equal, just a reasonable starting point); the 5-point
+footprint sampling pattern (vs. more samples, or a genuinely different scoring approach) if
+it doesn't look right in practice; `peak_candidacy_ele_floor` (500m) and the `0.999`
+worst-in-tier provisional priority fraction, both structural/architectural choices this time
+rather than tuned constants, but still worth a visual sanity check.
+
 ## Verification approach
 
 - Each phase: project builds clean (`make`, Release), relevant unit tests pass
