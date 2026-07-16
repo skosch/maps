@@ -844,6 +844,49 @@ this class of sign error is exactly why the screenshot-verification step exists,
 unit tests -- the math type-checked and built cleanly, and no unit test caught it since the
 formula's *correctness* (not just its shape) was the bug.
 
+## Phase 7 follow-up round 3 (2026-07-16): independent placement, per further review
+
+Sebastian caught a real crash: shortly after round 2 landed, he independently found and
+fixed a SIGSEGV in `nextAnchor()` (garbage anchor-list count, e.g. `7106415`) via headless
+Xvfb + `coredumpctl` (`04dca089d` in the submodule, `5c21a7e`/`1b26740` in the outer repo --
+all authored by Sebastian directly, not this session). His fix (bounds-checked
+`Anchors::operator[]`, an early-return guard in `nextAnchor()`) is a real safety net but
+explicitly left the root cause open. Root cause not conclusively found, but round 2's
+design had a real risk this round removes: the elevation label's `relative` pointed
+directly at the primary (name) label instead of the shared icon -- every other label
+relationship in this engine (icon<->text) keeps `relative` pointed at something with a
+stable, well-understood lifetime; making a *sibling* label's `relative` point at another
+sibling introduced a new pattern whose safety against the sibling dying independently was
+reasoned through, not proven.
+
+Also, real design feedback: real topo maps (Swisstopo, Kompass) and OSM itself don't
+require a peak's name and elevation to be adjacent -- OSM commonly has an elevation without
+a name (already handled: falls back to showing the elevation alone) or a name without
+elevation data (currently excluded entirely by this draw rule's `ele: {min: 1}` filter, a
+separate, un-addressed gap). Direction: place both independently via the same
+Imhof/Yoeli-ranked, ridge/vector-avoidance-modulated selection, prioritizing the name's
+placement, with "elevation stacks under the name" as a preferred *fallback* the optimizer
+settles into only when it isn't a worse choice -- not a hard link.
+
+**Redesign**: `Label::refineAnchor()` gains `setStackFallbackTarget()` -- a persistent
+pointer, but read only ONCE, synchronously, inside `refineAnchor()`, never dereferenced
+again afterward (unlike `m_relative`, read every frame for the label's whole lifetime).
+`refineAnchor()` scores "stack directly under the target" as one additional candidate
+(ridge + vector cost, same sampling machinery as the 8 compass anchors) and only takes it
+over the best independent compass anchor when it isn't meaningfully worse
+(`kStackPreferenceMargin`, tune by eye). Both labels keep `relative` = the icon throughout.
+The elevation label now gets the full Imhof/Yoeli anchor list and the same
+`salienceOrderedAnchors()` tile-build-time pass as the name (previously pinned to a single
+fixed anchor). `anchorGapScale` unified to `0.25` for both labels (previously `0.5` for the
+name and a compounded, inconsistent distance for elevation) -- addresses feedback that the
+name was roughly 2x too far from the peak and elevation roughly 3x too far, and that the two
+should match when placed independently.
+
+**Verification note**: per explicit instruction, this round was NOT verified via headless
+screenshot -- build (`make`) and unit tests (`make -f tests.mk`, 2024 assertions/184 cases)
+only. Visual correctness (does the elevation actually land under the name when expected,
+does independent placement look reasonable when it doesn't) is Sebastian's to check.
+
 ## Verification approach
 
 - Each phase: project builds clean (`make`, Release), relevant unit tests pass
