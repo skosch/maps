@@ -11,6 +11,15 @@
 /valhalla/
 /.cache/
 
+# Runtime state that ends up here (not in ~/.config/Ascend/) when initBaseDir()'s fallback
+# path is taken (app/src/glfwmain.cpp / app/linux/linuxmain.cpp) -- observed happening
+# repeatedly during headless agent testing in this repo, root cause not yet fixed. These
+# must never be committed and should never silently shadow a real ~/.config/Ascend/ setup.
+/assets/config.yaml
+/assets/mapsources.yaml
+/assets/cache/
+/assets/*.sqlite
+
 *.apk
 *.jar
 .DS_Store
