@@ -1949,22 +1949,30 @@ layers:
         points:
           sprite: peak
           size: 14px
-          # docs/label-placement-plan.md Task 3: LabelCollider::process() (tile-build time,
-          # TileWorker thread) pre-emptively kills same-repeatGroup labels within
-          # repeat_distance of each other using PROVISIONAL priority -- for peaks without a
-          # real OSM prominence tag, that's pure elevation, since the texture-shading-refined
-          # priority (Label::refinePriority(), main-thread, per-frame, see below) doesn't
-          # exist yet at this point. A peak's default repeat_distance is a full tile width
-          # (MapProjection::tileSize(), see TextStyleBuilder::applyRule/PointStyleBuilder::
-          # applyRule), which at typical zoom is a much larger radius than the visual spacing
-          # between genuinely distinct nearby summits -- meaning a locally-prominent-but-
-          # lower peak can lose this early, permanent cut to a taller-but-unremarkable
-          # neighbor well before texture-shading refinement ever gets a chance to correct the
-          # ranking. Shrunk to a radius that still dedupes genuinely-coincident sprite
-          # clutter (e.g. the same summit tagged more than once) without catching pairs of
-          # real, distinct peaks -- tuned by eye, needs Sebastian's visual sign-off like any
-          # other spacing/threshold constant in this file.
-          repeat_distance: 40px
+          # docs/label-placement-plan.md Task 3, revised 2026-07-16 (real bug, user report:
+          # "a whole range doesn't show the label for the most prominent peak; it shows
+          # maybe just one for a small foothill, but nothing for the big peak until I
+          # really zoom in, with no other labels or trails interfering"): this used to be
+          # `repeat_distance: 40px`, shrunk down from the default full-tile-width radius but
+          # still a mutual-suppression radius applied by LabelCollider::process() at
+          # TILE-BUILD TIME (TileWorker thread), using only PROVISIONAL priority (name +
+          # weak height tie-break -- see priority: below) since the texture-shading-refined
+          # value doesn't exist yet at this point (main-thread only, later). Any nonzero
+          # repeat_distance risks exactly the reported symptom: two real, distinct nearby
+          # summits sharing a repeat group, with the provisional signal (which can't see
+          # true visual/texture-shading prominence) picking the WRONG one to permanently
+          # kill (Label::State::dead -- irreversible, not reconsidered once real refinement
+          # would have ranked them correctly) -- worse at low zoom, where real-world
+          # peak-to-peak spacing maps to fewer screen pixels, exactly matching "shows only
+          # once I zoom in a lot." Disabled entirely (0 = opts out, see
+          # TextStyleBuilder::applyRule's `if (repeatDistance > 0.f)` gate, same mechanism
+          # already used to opt text2/elevation out of this for the same class of reason --
+          # see its own comment). Deduplicating genuinely-coincident sprites (the same
+          # summit double-tagged in OSM) is left entirely to the real per-frame OBB
+          # collision pass (LabelManager::handleOcclusions()) instead, which runs AFTER
+          # texture-shading refinement and correctly favors the truly more prominent peak
+          # rather than guessing from a crude provisional signal.
+          repeat_distance: 0
           # docs/label-placement-plan.md Phase 2/Task 3, revised 2026-07-16 after user
           # report ("main peak with a label name isn't showing... but elevations are
           # showing... in the same big font"): a NAMED peak must always outrank an unnamed/
@@ -2030,7 +2038,20 @@ layers:
           # as too far from the peak dot); the elevation label uses the SAME value (see its
           # own font block below) so, when placed independently, it sits exactly as close
           # to the icon as the name does.
+          #
+          # optional: true here (revised 2026-07-16, user report: "peak dots shouldn't be
+          # shown unless at least an elevation number is shown... or an elevation AND a
+          # name"): the icon<->text "die together" cascade (LabelCollider::killOccludedLabels
+          # / LabelManager::handleOcclusions, both keyed on Label::Options::optional) used to
+          # run the other way -- THIS (the name) was the non-optional label, so a dot could
+          # end up on screen with only a bare elevation number, or even with nothing at all
+          # if the name failed to place while the (optional) elevation simply never got a
+          # chance to try. Marking the name optional and text2/elevation NOT optional (see
+          # its own block below) flips the gate to what's actually wanted: the icon requires
+          # a successfully-placed ELEVATION to show at all; the name is free extra context
+          # that can fail independently without hiding the dot+elevation.
           text:
+            optional: true
             anchor_gap_scale: 0.25
             text_source: |
               function() {
