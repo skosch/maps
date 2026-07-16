@@ -1965,31 +1965,46 @@ layers:
           # real, distinct peaks -- tuned by eye, needs Sebastian's visual sign-off like any
           # other spacing/threshold constant in this file.
           repeat_distance: 40px
-          # docs/label-placement-plan.md Phase 2/Task 3 (revised 2026-07-15): real OSM
-          # prominence tag wins outright when present (Math.sqrt-compressed into the
-          # fractional part, same idiom as place_fn above). Otherwise -- this is the fix for
-          # user-reported feedback that peak salience must come from texture shading, NEVER
-          # elevation -- this peak gets a deliberately WORST-IN-TIER provisional priority
-          # (fixed 0.999 fraction, not elevation-weighted: elevation is not a salience signal
-          # and must not influence ranking even provisionally) so it displays *nothing* until
-          # LabelManager refines it on the main thread using the CPU texture-shading sampler,
-          # once the elevation mosaic is available at this peak's position
-          # (priority_texture_shading below) -- the texture-shading term can't safely run
-          # here, at tile-build time, since this function executes on a TileWorker thread and
-          # the elevation raster mosaic is main-thread-only (see textureShading.h).
-          # Label::refinePriority() replaces the fractional part with a texture-shading-
-          # derived one (floor(priority) is preserved, which is why 0.999 -- not some larger
-          # offset -- keeps this in the same integer tier as global.priority.peak, letting the
-          # refined value land correctly back in that tier once genuine prominence is known).
-          # A peak that's never refined (e.g. no terrain data for this map style) simply never
-          # outranks anything -- an acceptable, expected steady state, not a bug (mirrors
-          # Phase 2's original fallback contract).
+          # docs/label-placement-plan.md Phase 2/Task 3, revised 2026-07-16 after user
+          # report ("main peak with a label name isn't showing... but elevations are
+          # showing... in the same big font"): a NAMED peak must always outrank an unnamed/
+          # elevation-only one, full stop, regardless of texture-shading timing -- prior to
+          # this, both shared the exact same priority band (worst-in-tier 0.999 until
+          # texture-shading refinement), so an anonymous OSM elevation node could easily
+          # beat (or simply refine faster than) a genuinely famous named summit nearby.
+          #
+          # Two disjoint HALF-integer bands within the peak tier: named peaks get
+          # [global.priority.peak, +0.4], unnamed ones get [global.priority.peak+0.5, +0.9].
+          # Real OSM prominence (rare) or, failing that, a weak height-based tie-break (per
+          # user request -- "prioritize... based on prominence, height, and the fact that
+          # they have a name"; NOT a real prominence proxy on its own, see
+          # peak_candidacy_ele_floor's comment on why elevation can't stand in for
+          # prominence -- just a same-band nudge until texture shading provides the real
+          # signal) place each peak within its band via `badness` (0 = best, kMaxFraction =
+          # worst-in-band). kMaxFraction=0.4 leaves a comfortable margin below the 0.5 gap
+          # to the other band, so even a maximally-refined unnamed peak (see below) can
+          # never cross into named territory. Label::refinePriority() (main thread, once
+          # the elevation mosaic loads) replaces the fractional part with a texture-shading-
+          # derived one, but recovers the HALF-tier floor via floor(priority*2)/2, not
+          # floor(priority) -- see its own comment -- which is what actually preserves this
+          # named/unnamed separation through refinement instead of collapsing both bands
+          # back together. A peak that's never refined (e.g. no terrain data for this map
+          # style) simply stays at its band's provisional value, worst-in-band but still
+          # correctly ranked relative to the other band -- an acceptable, expected steady
+          # state, not a bug (mirrors Phase 2's original fallback contract).
           priority: |
             function() {
+                var name = global.show_name_en && feature.name_en ? feature.name_en : feature.name;
+                var base = name ? global.priority.peak : global.priority.peak + 0.5;
+                var kMaxFraction = 0.4;
+                var badness;
                 if (feature.prominence) {
-                    return global.priority.peak - Math.round(Math.sqrt(Math.min(1, feature.prominence/3000)) * 4096)/65536;
+                    badness = 1 - Math.sqrt(Math.min(1, feature.prominence/3000));
+                } else {
+                    var eleFrac = Math.min(1, feature.ele/6000);
+                    badness = 1 - 0.3 * eleFrac;
                 }
-                return global.priority.peak + 0.999;
+                return base + Math.round(badness * kMaxFraction * 65536)/65536;
             }
           priority_texture_shading: true
           # docs/label-placement-plan.md Task 1, redesigned 2026-07-16 after user review:
@@ -2019,11 +2034,19 @@ layers:
             anchor_gap_scale: 0.25
             text_source: |
               function() {
+                  // Revised 2026-07-16 after user report: this used to fall back to
+                  // showing the elevation number here when there's no name -- but that
+                  // rendered it in THIS label's big/semibold 12px font, indistinguishable
+                  // from an actual peak name (reasonably read as "is this a bug, or did
+                  // someone tag a peak's elevation as its name in OSM?" -- neither: it was
+                  // this scene's own fallback). An elevation-only OSM node is not a named
+                  // summit and shouldn't look like one. Now: no name means no primary label
+                  // at all (PointStyleBuilder::addFeature independently builds text2 below
+                  // regardless of whether this one produced anything -- see its own
+                  // comment), so the elevation, when there's no name, shows ONLY via
+                  // text2's small/regular 9px font.
                   var name = global.show_name_en && feature.name_en ? feature.name_en : feature.name;
-                  if(!name) {
-                      const ele = global.metric_units ? feature.ele : feature.ele*3.2808399;
-                      return ele.toFixed(0);
-                  }
+                  if(!name) { return ""; }
                   if(name.slice(-9) == " Mountain") { name = name.slice(0, -9) + " Mt."; }
                   else if(name.slice(0, 6) == "Mount ") { name = "Mt. " + name.slice(6); }
                   return name;
@@ -2047,12 +2070,15 @@ layers:
           text2:
             text_source: |
               function() {
-                  // Elevation-only sub-label, lighter weight than the name. Skip it when
-                  // there's no name: the primary label above already falls back to
-                  // showing the elevation by itself in that case, so a second identical
-                  // number would just duplicate it.
-                  var name = global.show_name_en && feature.name_en ? feature.name_en : feature.name;
-                  if(!name) { return ""; }
+                  // Elevation sub-label, always the small/regular font, regardless of
+                  // whether this peak has a name -- revised 2026-07-16: this used to skip
+                  // itself when there's no name (on the theory that the primary label above
+                  // already showed the elevation by itself in that case), but that meant an
+                  // unnamed elevation-only peak's number rendered in the PRIMARY label's
+                  // big/semibold font, indistinguishable from an actual peak name. The
+                  // primary above now returns "" when there's no name instead, so this is
+                  // unconditionally the only place elevation ever renders, in a font that
+                  // reads as "just a data point," not a summit name.
                   const ele = global.metric_units ? feature.ele : feature.ele*3.2808399;
                   return ele.toFixed(0);
               }
