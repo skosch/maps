@@ -1973,39 +1973,30 @@ layers:
                 return global.priority.peak + 0.999;
             }
           priority_texture_shading: true
-          # docs/label-placement-plan.md Task 1: name (semibold) + elevation (regular) in
-          # two different font weights. Confirmed there is NO per-line/per-glyph-run font
-          # override anywhere in the text pipeline -- FontContext::layoutText shapes an
-          # entire label's text (including embedded "\n") with exactly one alfons::Font,
-          # and TextStyle::Parameters/DrawRuleData::params both hold a single font per
-          # rule -- so a single combined "name\nele" string, as this used to be, can only
-          # ever render in one weight. Fixed by splitting into two separate, independently
-          # styled TextLabels, both linked to the peak icon via the SAME
-          # Label::setRelative() mechanism PointStyleBuilder already uses for icon+text
-          # (see the new "text2:" block below and PointStyleBuilder::addFeature /
-          # TextStyleBuilder::applySecondaryTextRule) -- siblings of one another, not a
-          # 3-level icon->name->elevation chain, since TextLabel::applyAnchor only ever
-          # resolves one level of `m_relative` (would need new chain-walking code to go
-          # deeper). The elevation label is PINNED to a fixed `bottom` anchor (not the
-          # name label's salience-ordered anchor list) and manually pushed straight down
-          # by the name label's own *measured* height (read back from the already-built
-          # primary label) plus a small gap, so it sits below the name instead of
-          # overlapping it, and is marked `optional` so a placement failure only drops
-          # the elevation line rather than taking the peak's name down with it. Fixed
-          # (not salience-ordered) anchor was a deliberate correction after a real bug:
-          # an earlier version called salienceOrderedAnchors() separately for this label
-          # (using its own smaller footprint) and derived the push direction from
-          # *that* result -- since the name label and this label cycle anchors
-          # independently at runtime on collision (LabelManager::handleOcclusions calls
-          # Label::nextAnchor() per-label), the two directions could silently disagree,
-          # leaving this label stacked exactly on top of the name and permanently losing
-          # that collision. A single shared, fixed anchor avoids the mismatch entirely;
-          # the tradeoff is the elevation line doesn't rotate away from clutter (water/
-          # trail/other labels) the way the name label does -- acceptable since it's
-          # optional and simply won't show in that case, same as any other dense-terrain
-          # collision loss (confirmed via headless screenshots this is a real, expected
-          # occurrence in contour-line-dense alpine terrain, not unique to this label).
+          # docs/label-placement-plan.md Task 1, redesigned 2026-07-15 after user feedback
+          # ("anchored separately... makes no sense"): name (semibold) + elevation
+          # (regular) in two different font weights. Confirmed there is NO per-line/per-
+          # glyph-run font override anywhere in the text pipeline -- FontContext::
+          # layoutText shapes an entire label's text (including embedded "\n") with
+          # exactly one alfons::Font -- so a single combined "name\nele" string, as this
+          # used to be, can only ever render in one weight. Fixed by splitting into two
+          # separate TextLabels (see the "text2:" block below), but the SECOND label's
+          # `relative` is the PRIMARY (name) label itself, not the icon -- so it stacks
+          # directly under the name via the same single-level relative-dimension offset
+          # every other icon-linked text label already uses (TextLabel::applyAnchor), with
+          # a single fixed `bottom` anchor (always "below" the name label in the name
+          # label's own local frame, whichever way that ends up pointing on screen) and a
+          # small anchor_gap_scale (see text2's own font block below) for a tight,
+          # line-break-like stack instead of a whole extra icon-sized gap. Horizontal
+          # alignment (left-aligned under a right-anchored name, right-aligned under a
+          # left-anchored name, centered under a centered one) is kept in sync every frame
+          # by Label::syncRelativeAnchor(), since the name's own anchor can still change
+          # later via Label::refineAnchor() (main thread, runs after tile build).
+          # anchor_gap_scale below (0.5) also halves the icon<->name gap itself, per
+          # feedback that the default gap ("clear of the icon's full dimension, halved")
+          # read as too far from the peak dot.
           text:
+            anchor_gap_scale: 0.5
             text_source: |
               function() {
                   var name = global.show_name_en && feature.name_en ? feature.name_en : feature.name;
