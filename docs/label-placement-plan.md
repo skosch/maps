@@ -960,9 +960,75 @@ regions, multiple zooms, default map source) shows it rendering correctly with n
 and no more zoom-gate suppression. Still outstanding, not yet addressed: named peaks with
 no elevation data are excluded entirely by the draw rule's `ele: {min: 1}` filter (flagged
 in round 3, not fixed); the Matterhorn-specific anomaly noted just above; the equal 1:1
-texture-shading/
-vector-density cost weighting and the 5-point footprint sampling density remain unvalidated
-tunables pending Sebastian's own visual judgment on the live map.
+texture-shading/vector-density cost weighting and the 5-point footprint sampling density
+remain unvalidated tunables pending Sebastian's own visual judgment on the live map.
+
+## Phase 7 follow-up round 4 (2026-07-16): named vs. unnamed peaks, and a prominence question
+
+Sebastian's next report, in one message: (a) unnamed elevation-only peaks were rendering
+their number in the primary label's big/semibold font, indistinguishable from a real peak
+name -- "someone put them in as peaks with the elevation as the name in OSM? ... or is
+this a bug" (it was our own fallback, not OSM data); (b) in cluttered terrain, notable
+named peaks (Matterhorn specifically) should be prioritized over anonymous elevation
+points based on "prominence, height, and the fact that they have a name"; (c) an open
+question about whether the texture-shading signal is theoretically adequate as a
+prominence proxy, or whether something scale-aware is needed.
+
+**(a)+(b) fixed** -- see `tangram-es` commit `94bae6955` / outer `83863b4`. Root cause of
+both: named and unnamed peaks shared one priority band (worst-in-tier until
+texture-shading refinement), and the primary label's `text_source` used the elevation as
+a name-fallback in its own 12px/600 font. Now: two disjoint half-integer priority bands
+(named `[peak, +0.4]`, unnamed `[peak+0.5, +0.9]`, blending in real OSM `prominence` or a
+weak height-based tie-break per the user's "prominence, height, and name" framing --
+`Label::refinePriority()` recovers the band via `floor(priority*2)/2` instead of
+`floor(priority)`, which is what actually survives refinement instead of collapsing both
+bands together); primary `text_source` returns `""` with no name, and text2 (small 9px
+font) is now built independently of whether the primary succeeded, so it's unconditionally
+the only place elevation ever renders. Verified via headless screenshot (default map
+source): visibly more named peaks surface, and bare elevation numbers are now clearly
+smaller than peak names. The Matterhorn itself still didn't get a label in the one
+extremely cluttered Zermatt test view even after this fix -- likely an ordinary
+collision loss in a uniquely busy spot (dense hut/piste/trail labels), not a repeat of
+this bug; not yet root-caused, flagged for a follow-up look.
+
+**(c) is a real, unresolved design question, analyzed but not implemented.** The CPU
+sampler (`textureShading.cpp`) sums `kMaxLevels=4` box-filter-downsampled octave bands,
+each a further 2x2 downsample of the last, weighted by Brown's `2^(-k*alpha)` power law --
+this is already "multi-scale" in the sense the user describes, but the scale RANGE it
+covers is small and fixed: each octave doubles the ground footprint from the tile's own
+texel size, and `kMaxLevels` is capped at 4 specifically because the mosaic is only a
+3x3-tile neighbor-ring (`docs/texture-shading-plan.md`'s Frozen Interface Contract) --
+going deeper would start reading past real data into the mirror-extrapolated edge, giving
+wrong answers. In practice this means the signal captures local curvature/roughness within
+roughly a tile-texel-scale neighborhood (hundreds of meters, not tens of kilometers), and
+is NOT tied to current view zoom at all (`sampleTextureShading()`'s own doc comment: fixed
+alpha/contrast, unlike the live shader's continuous zoom-dependent blend -- deliberate, so
+a peak's priority doesn't change as the camera moves).
+
+This explains the Matterhorn case mechanically: real topographic prominence is about
+standing out from an entire REGIONAL basin (tens of km), which is a fundamentally larger
+scale than 4 local octaves can see. Locally, the Matterhorn's summit curvature isn't
+necessarily sharper than Dent Blanche's or the Breithorn's -- they're all steep alpine
+rock -- so a purely local signal can't tell "the one peak that dominates this whole
+valley" from "one of several similarly jagged neighbors." True prominence (height above
+the highest saddle connecting to any higher peak) is a global watershed computation, well
+outside what a live, per-tile, streaming renderer can do -- it's exactly what OSM's
+`prominence` tag is FOR, when present (which, per Sebastian's own observation, is rare).
+
+A tractable middle ground, not yet built: a genuine large-radius "isolation" signal,
+computed cheaply by ring-sampling the elevation raster (already fetched per-tile, no new
+mosaic infrastructure needed) at a handful of points across a few increasingly large
+radii, and comparing the peak's own height against the ring maxima -- a coarse
+approximation of "is there anything higher nearby" rather than "is this local texture
+sharp." The user's "relevant to the current zoom level" framing maps naturally onto this:
+ring radius should grow as view zoom decreases (zoomed way out, only regionally-dominant
+peaks should matter; zoomed in, local texture-shading sharpness is the more relevant
+signal), blended with the existing local signal rather than replacing it. This is a real
+follow-up worth scoping as its own phase -- new sampling infrastructure, a threading/perf
+story (ring sampling at large radii means touching tiles beyond the current mosaic, so it
+needs its own main-thread-safe lookup path, likely amortized/cached since it's much more
+expensive than the existing single-tile mosaic lookup), and its own visual tuning pass --
+not attempted in this round.
 
 ## Verification approach
 
