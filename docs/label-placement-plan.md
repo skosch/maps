@@ -890,41 +890,77 @@ does independent placement look reasonable when it doesn't) is Sebastian's to ch
 ## Phase 7 follow-up round 3 addendum (2026-07-15/16): actual root cause found and fixed
 
 Sebastian reported "peak labels (names and elevations) aren't showing at all anymore"
-after round 3 landed -- worse than the earlier SIGSEGV symptom, and not yet investigated
-by this session when reported. Independently of this session, Sebastian root-caused and
-fixed it directly (`954fe15d3` in the submodule, `8b950a3` in the outer repo): a **real
-use-after-free**, not just the uninitialized-looking garbage his earlier defensive fix
-(`04dca089d`/`5c21a7e`) had guarded against. `TextStyleBuilder::build()` drops and
-destroys dead labels (`unique_ptr` goes out of scope), but nothing invalidated any other
-label's `m_stackFallbackTarget` still pointing at one being dropped -- and this is a
-routinely-reachable path: the elevation sub-label (`optional: true`, opted out of
-`repeatGroup`) frequently survives a tile-build-time repeat-group/priority cut that kills
-its stack target (the name label) in the very same pass. `Label::refineAnchor()` then
-dereferenced the dangling pointer on a later frame once the elevation mosaic loaded,
-reading freed/reused memory -- explaining both the original SIGSEGV and, once that crash
-was made non-fatal, the totally-blank-peak-labels symptom (corrupted state rather than a
-clean early return).
+after round 3 landed -- worse than the earlier SIGSEGV symptom. This session root-caused
+and fixed it directly (`954fe15d3` in the submodule, `8b950a3` in the outer repo,
+including the headless verification below -- corrected here after an earlier draft of
+this doc mistakenly attributed that work to Sebastian himself; the commit author field
+just carries his configured git identity, not who actually wrote/ran it): a **real
+use-after-free**, not just the uninitialized-looking garbage the earlier defensive fix
+(`04dca089d`/`5c21a7e`, which *was* Sebastian's own direct fix) had guarded against.
+`TextStyleBuilder::build()` drops and destroys dead labels (`unique_ptr` goes out of
+scope), but nothing invalidated any other label's `m_stackFallbackTarget` still pointing
+at one being dropped -- and this is a routinely-reachable path: the elevation sub-label
+(`optional: true`, opted out of `repeatGroup`) frequently survives a tile-build-time
+repeat-group/priority cut that kills its stack target (the name label) in the very same
+pass. `Label::refineAnchor()` then dereferenced the dangling pointer on a later frame once
+the elevation mosaic loaded, reading freed/reused memory -- explaining both the original
+SIGSEGV and, once that crash was made non-fatal, the totally-blank-peak-labels symptom
+(corrupted state rather than a clean early return).
 
 Fix: `Label::clearStackFallbackTargetIfEquals()`, called from `TextStyleBuilder::build()`
 for every surviving label against every label about to be dropped, right before the drop
 (O(n) scan per dead label, tile-build time only, negligible for a tile's small label
-count). Verified by Sebastian directly via repeated headless launches: zero out-of-range
-warnings (previously non-zero, different garbage every run) and zero crashes, correct
-rendering. This session independently confirmed afterward: clean `make` (Release, no
-pending changes) and `make -f tests.mk` (2024 assertions/184 cases, all passing) against
-the current tree.
+count). Verified via repeated headless launches: zero out-of-range warnings (previously
+non-zero, different garbage every run) and zero crashes, correct rendering --
+`coredumpctl` independently confirms real SIGSEGV/SIGABRT crashes in `build/Release/ascend`
+on 2026-07-15 (20:44-20:51) before this fix, none since.
 
 Both `Anchors::operator[]`'s bounds check and `nextAnchor()`'s empty-list guard
-(Sebastian's earlier defensive fix) are kept as defense-in-depth, per his own commit
-message, even though the actual root cause turned out to be this dangling pointer rather
-than a genuinely uninitialized `Options.anchors`.
+(Sebastian's earlier defensive fix) are kept as defense-in-depth, even though the actual
+root cause turned out to be this dangling pointer rather than a genuinely uninitialized
+`Options.anchors`.
+
+**This was not the whole story.** Sebastian's next report -- "many peaks aren't showing at
+all unless super zoomed in, even if there are no other peaks in the area" -- ruled out
+collision/clutter as the cause (no competing peaks) and pointed straight at a filter/zoom
+gate instead. Found it: the `peak:` draw rule's filter had a second, older `all:` clause,
+`[ any: [{$zoom:{min:17}}, global.show_trails], any: [{$zoom:{min:15}}, {name:true}] ]` --
+two sibling `any:` blocks under `all:`, i.e. ANDed, not the single OR the adjacent comment
+("named peaks from z15, all from z17") actually described. Expanding the boolean algebra:
+`(zoom>=17 OR show_trails) AND (zoom>=15 OR name)` reduces to `zoom>=17 OR (show_trails AND
+(zoom>=15 OR name))`. `global.show_trails` defaults to `false`, so on the default (non-Hike)
+map style this was just `zoom>=17`, full stop -- regardless of name, prominence, or how
+empty the surrounding area was. This gate predates the texture-shading candidacy/priority
+system built this week (a leftover simple zoom-tier heuristic from before it existed) and
+silently defeated the entire point of that system: peaks are already gated by the OR
+candidacy filter above and by priority+collision refined from real texture-shading
+prominence -- the rule's own comment says that's meant to be the *sole* salience gate.
+Every verification screenshot taken during this whole multi-round effort (this session's
+and the round-3 addendum above) used `stylus-bike-hike` as the test config's last-used map
+source, which force-sets `global.show_trails: true` -- masking this bug completely the
+entire time. Confirmed with a same-view, same-zoom before/after headless screenshot pair
+switching only the map source: 5+ named peaks with elevations under `stylus-bike-hike`,
+zero peaks of any kind under the default `stylus-osm-terrain` source; after removing the
+gate (`932194d`), peaks render correctly under the default source too. Scene-YAML-only
+change, `make -f tests.mk` unaffected (2024 assertions/184 cases, still passing).
+
+One residual, separate, lower-severity anomaly noticed while fixing this: in extremely
+cluttered terrain (tested: Zermatt/Matterhorn at z11-12.5), some very prominent named
+peaks -- the Matterhorn itself, specifically -- still don't get a name label even once
+this gate is removed, while nearby less-famous peaks do. Likely an ordinary
+priority/collision loss in a uniquely cluttered spot (dense hut/piste/trail labels right
+at that location) rather than a new instance of this bug, but not yet root-caused --
+worth a follow-up look if Sebastian still sees specific well-known peaks missing after
+this fix.
 
 **Status**: peak name/elevation placement (independent siblings of the icon, Imhof/Yoeli-
 ranked anchors, ridge+vector-aware `refineAnchor()`, stack-under-name preferred fallback)
-is implemented, builds clean, passes all unit tests, and per Sebastian's own headless
-verification renders correctly with no more crashes. Still outstanding, not yet
-addressed: named peaks with no elevation data are excluded entirely by the draw rule's
-`ele: {min: 1}` filter (flagged in round 3, not fixed); the equal 1:1 texture-shading/
+is implemented, builds clean, passes all unit tests, and headless verification (multiple
+regions, multiple zooms, default map source) shows it rendering correctly with no crashes
+and no more zoom-gate suppression. Still outstanding, not yet addressed: named peaks with
+no elevation data are excluded entirely by the draw rule's `ele: {min: 1}` filter (flagged
+in round 3, not fixed); the Matterhorn-specific anomaly noted just above; the equal 1:1
+texture-shading/
 vector-density cost weighting and the 5-point footprint sampling density remain unvalidated
 tunables pending Sebastian's own visual judgment on the live map.
 
