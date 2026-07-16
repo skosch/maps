@@ -810,6 +810,40 @@ it doesn't look right in practice; `peak_candidacy_ele_floor` (500m) and the `0.
 worst-in-tier provisional priority fraction, both structural/architectural choices this time
 rather than tuned constants, but still worth a visual sanity check.
 
+## Phase 7 follow-up round 2 (2026-07-15): elevation label layout, per further review
+
+Two more concrete pieces of feedback: (a) "the labels are too far away from the peaks...
+should be half of their current distance," (b) "the elevation number is now included but
+anchored separately. This makes no sense" -- with a specific requested layout: elevation
+directly below the name (like a line break), left-aligned when the name sits right of the
+peak, right-aligned when left of it, centered when the name is centered above/below the dot.
+
+**Gap halved**: new `Label::Options::anchorGapScale` (default `1.0`, unchanged everywhere
+else) scales the relative's dimension contribution to `TextLabel::applyAnchor()`'s
+icon<->label gap formula. New `text_anchor_gap_scale` style param; the peak name label sets
+it to `0.5`.
+
+**Elevation label re-architected**: its `relative` is now the **primary (name) label**, not
+the icon -- genuinely different from the original sibling-of-icon design. With a single
+fixed `bottom` anchor and its own small `anchorGapScale` (`0.3`), the *existing* single-level
+relative-dimension offset in `applyAnchor()` naturally stacks it just below the name in the
+name's own local frame -- whichever screen direction that ends up pointing (right/left/top/
+bottom) falls out for free, with no per-anchor-direction special-casing needed: this covers
+all four cases in the request (right/left-anchored name -> elevation directly below;
+top-anchored name -> elevation lands between name and icon; bottom-anchored name -> elevation
+lands below the name) via one mechanism. Horizontal alignment is kept in sync every frame by
+a new `Label::syncRelativeAnchor()` (mirroring `syncRelativePriority()`'s pattern exactly),
+since the name's own anchor can still change later via `Label::refineAnchor()` running on the
+main thread after tile build -- a one-time alignment decision at construction would go stale.
+
+**One real bug found via screenshot verification**: the initial alignment formula had the
+correction sign backwards, pushing the elevation number further from the intended edge
+instead of toward it -- caught by a headless screenshot showing "1654" shifted the wrong way
+under "The West Lion," fixed and re-verified in a follow-up screenshot. Worth remembering:
+this class of sign error is exactly why the screenshot-verification step exists, not just the
+unit tests -- the math type-checked and built cleanly, and no unit test caught it since the
+formula's *correctness* (not just its shape) was the bug.
+
 ## Verification approach
 
 - Each phase: project builds clean (`make`, Release), relevant unit tests pass
