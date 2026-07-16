@@ -2026,18 +2026,21 @@ layers:
           # The two labels are placed INDEPENDENTLY, each via its own Imhof/Yoeli-ranked +
           # ridge/vector-avoidance anchor selection (TextStyleBuilder::salienceOrderedAnchors
           # / Label::refineAnchor) -- real topo maps (and OSM) don't require a peak's name
-          # and elevation to be adjacent, so this scene doesn't force it either. The one
-          # deliberate coupling: the elevation label prefers stacking directly under the
-          # name (PointStyleBuilder::addFeature's setStackFallbackTarget() call) when that's
-          # not meaningfully worse, cost-wise, than an independent spot -- a *default
-          # fallback*, not a hard link, per Label::refineAnchor()'s own doc comment for the
-          # full mechanism.
+          # and elevation to be adjacent, so this scene doesn't force it either. No coupling
+          # between the two anymore (revised 2026-07-16, user report of inconsistent
+          # icon-to-elevation distance: an earlier "prefer stacking directly under the name"
+          # fallback, setStackFallbackTarget(), was removed -- see Label::refineAnchor()'s
+          # header comment in label.h for why): both labels always use the SAME
+          # icon-relative anchor formula (icon radius + own half-extent + anchor_gap_scale
+          # gap below), so they end up the same fixed distance from the icon regardless of
+          # which anchors they land on. A "name, elevation stacked right below" look can
+          # still happen when both independently pick vertically-adjacent anchors, but it's
+          # no longer a distinct mode with its own offset math.
           #
           # anchor_gap_scale below halves the default icon<->label gap (per feedback the
           # default -- "clear of the icon's full dimension, halved already" -- still read
           # as too far from the peak dot); the elevation label uses the SAME value (see its
-          # own font block below) so, when placed independently, it sits exactly as close
-          # to the icon as the name does.
+          # own font block below) so it sits exactly as close to the icon as the name does.
           #
           # optional: true here (revised 2026-07-16, user report: "peak dots shouldn't be
           # shown unless at least an elevation number is shown... or an elevation AND a
