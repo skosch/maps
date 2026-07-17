@@ -1541,6 +1541,67 @@ enforced for this specific gap. If that's not actually the desired behavior for 
 case, it's a one-line policy call (e.g. let the icon show alone when a real
 `prominence`/`wikipedia` tag is present even without `ele`), not a further investigation.
 
+## Phase 7 follow-up round 12 (2026-07-17): name/elevation overlap — a real regression from round 11, plus a measurement lesson
+
+Sebastian confirmed the naked-dot fix but reported a new symptom: "some peaks where name
+and elevation are overlapping." Round 11's own commit message already named the likely
+culprit in hindsight -- it had, "for symmetry" with round 10's real fix, also exempted
+sibling labels (a peak's name and elevation sub-label, both `relative() == the icon`) from
+occluding each other in `LabelManager::handleOcclusions()`'s **per-frame** collision loop.
+That symmetry was wrong: round 10's build-time exemption (`LabelCollider::process()`) is a
+one-shot pass with no retry mechanism, so exempting siblings there is the only way to avoid
+permanently killing one of them. `handleOcclusions()` is different -- it already has a
+graceful, real resolution mechanism for two labels landing on the same anchor:
+`nextAnchor()` cycling, driven by exactly the kind of intersection round 11 suppressed.
+Exempting siblings there didn't prevent a real collision, it prevented the *fix* for a real
+collision -- so whenever a peak's name and elevation sub-label started on the same
+icon-relative anchor (routine, before independent per-label refinement has spread them
+apart), they could sit permanently overlapping instead of one of them cycling to its next
+candidate anchor. **Fix**: reverted round 11's runtime exemption, keeping round 10's
+build-time one (still correct/necessary there).
+
+**A real methodology lesson from verifying this**, worth remembering for any future label-
+placement work: `Label::screenCenter()` is **not** the rendered position for a child label
+(a peak's name/elevation sub-label) -- it's the value set in
+`TextLabel::updateScreenTransform()`, which for `Type::point` is just the projected world
+position of `m_coordinates[0]`. Every one of a peak's labels (icon, name, elevation) is
+constructed with the **same** coordinate (the icon's own position, `{{p, p}}` in
+`PointStyleBuilder::addFeature()`) -- so `screenCenter()` is identical for every sibling of
+the same icon, by construction, regardless of which anchor each one actually rendered at.
+The real per-label offset (`m_anchor`, computed by `applyAnchor()` from the label's chosen
+compass direction and its own dimension) is added separately, only at the point of building
+the OBB (`TextLabel::obbs()`) and the actual mesh vertices (`addVerticesToMesh()`) -- never
+reflected in `screenCenter()` itself. A first attempt at instrumenting this compared raw
+`screenCenter()` between siblings and found "576 overlapping pairs" even after the real fix
+was in place -- entirely a measurement artifact (comparing the shared icon anchor point,
+which is trivially identical for any two siblings whether or not they're actually rendered
+apart), not a real symptom. Corrected by temporarily exposing `m_anchor` and comparing
+`screenCenter() + m_anchor` instead, which confirmed 0 real overlaps once the fix was in
+place (up to 747 visible peak icons checked in a single frame). Any future per-label
+position/collision debugging on this codebase should reach for the OBB (via `obbs()`) or an
+`m_anchor`-inclusive position, not raw `screenCenter()`, when comparing two *different*
+labels' actual rendered positions.
+
+**A second, purely operational lesson**: after making this fix, verifying it against the
+already-built `build/Release/ascend` (built *before* this fix, from the round 11 commit)
+initially looked like the fix hadn't worked, since Release still showed the old
+overlapping behavior live -- simply because Release hadn't been rebuilt yet after the
+source change. Debug had been rebuilt (and tested clean); Release lagged behind. No
+divergence between the two builds was actually involved this time (unlike round 6's real
+Debug/Release divergence) -- always verify both binaries' timestamps are newer than the
+fix commit before treating a live discrepancy as a real Debug-vs-Release difference.
+
+**Verification**: after reverting round 11's runtime exemption, rebuilt both `build/Debug/
+ascend` and `build/Release/ascend` from a clean, confirmed-current build (binary
+timestamps checked against the fix), `make -f tests.mk` passes (2031 assertions/185 cases,
+unchanged), and the corrected `screenCenter() + m_anchor` measurement shows 0 sibling
+overlaps across multiple headless runs at the Zermatt coordinates.
+
+```
+./build/Release/ascend --view.lat 45.9763 --view.lng 7.6586 --view.zoom 12.5 --view.rotation 0 --view.tilt 0 --sources.last_source stylus-osm-terrain
+./build/Debug/ascend   --view.lat 45.9763 --view.lng 7.6586 --view.zoom 12.5 --view.rotation 0 --view.tilt 0 --sources.last_source stylus-osm-terrain
+```
+
 ## Verification approach
 
 - Each phase: project builds clean (`make`, Release), relevant unit tests pass
