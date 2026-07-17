@@ -1371,6 +1371,117 @@ mechanism itself. Updated run commands (now resetting rotation/tilt):
 is gentler per-frame but takes more frames (and hence longer wall-clock time while the camera
 is still, before `m_needUpdate` stops mattering) to fully settle.
 
+## Phase 7 follow-up round 10 (2026-07-17): the real Matterhorn root cause, found and fixed
+
+Round 9 ended with a fresh ground-up redesign spec (`docs/label-placement-v2-spec.md`),
+written for whichever agent implemented it next, with an explicit instruction to root-cause
+the Matterhorn mystery *first* before touching anything else. That spec's leading hypothesis
+was `LabelManager::priorityComparator()`'s `occludedLastFrame()` anti-flicker hysteresis
+(labelManager.cpp, tiebreak stage 6) -- a genuine, real piece of history-dependent behavior,
+but, as this round found, **not what was actually killing Matterhorn's name label.**
+
+**Method**: rather than continue guessing from live-Debug-build screenshots (slow, and per
+`CLAUDE.md` policy not something to self-grade anyway), this round added temporary
+`#ifdef DEBUG`-only `LOGW` instrumentation at successive points along the label's lifecycle
+(tile-build-time construction in `pointStyleBuilder.cpp`, then a full inventory dump of every
+`debugTag`'d label actually reaching `LabelManager::m_labels` per frame, then the specific
+build-time kill site once the general area was narrowed down), each tagged for later removal,
+and ran the app headlessly under Xvfb at the Zermatt coordinates (`--view.lat 45.9763
+--view.lng 7.6586 --view.zoom 12.5 --view.rotation 0 --view.tilt 0 --sources.last_source
+stylus-osm-terrain`) to capture real log output -- not a screenshot, just text, matching this
+project's existing established pattern of log-based (not visual) instrumentation debugging.
+
+**Finding #1**: the inventory dump showed Matterhorn's icon (`pois:peak`, priority 14.1647,
+exactly matching round 9's decoded `ele=4478`/`prominence=1038`) and its elevation sub-label
+(`4478`) reaching `m_labels` every time, but the **name label itself (`'Matterhorn'`) never
+appeared at all** -- not occluded, not dead-but-present, simply absent from the per-frame
+list altogether. Every neighboring peak (Castor, Dent d'Hérens, Breithorn, etc.) showed all
+three sub-labels; only Matterhorn (and, separately, an unrelated `Matterhorn Museum` POI) was
+missing its name.
+
+**Finding #2**: decoding the actual OSM feature (`ogrinfo` against the gunzipped MVT tile,
+`assets/cache/stylus-osm.mbtiles` z12/x2135/y2638) confirmed `name=Matterhorn` is very much
+present in the raw tile data -- ruling out a missing/empty `name` tag. Temporary
+instrumentation at `PointStyleBuilder::addFeature()`'s `havePrimary =
+textStyleBuilder.prepareLabel(...)` call (pointStyleBuilder.cpp) confirmed the name label
+*is* constructed successfully at tile-build time (`havePrimary=1`, `params.text='Matterhorn'`)
+-- so the label object exists, but never makes it into `LabelManager::m_labels`. Per
+`labelManager.cpp`'s `processLabelUpdate()`, a label whose `state() == Label::State::dead` is
+silently skipped every frame -- so something was killing it, permanently, before it was ever
+handed to the per-frame system at all.
+
+**Root cause, confirmed**: `LabelCollider::process()` (labelCollider.cpp) runs once, at
+tile-build time, on a TileWorker thread, using only the *provisional* (pre-texture-shading-
+refinement) priority and each label's *first-choice, unrefined* anchor (before
+`Label::refineAnchor()`'s main-thread ridge/vector-aware refinement ever runs). It does a
+real OBB collision pass across every label candidate in the tile and permanently kills
+(`Label::State::dead`, irreversible) whichever loses. This pass already exempts a label from
+colliding with its own icon (`l1->relative() == l2 || l2->relative() == l1`), but **not from
+colliding with its own sibling** -- another label that shares the *same* icon as its
+`relative()`. A peak's name and elevation sub-label are exactly such siblings: both compute
+their anchor via the identical icon-relative formula (round-9-era Task 1 redesign,
+"independently placed, same fixed distance from the icon"), so at their shared first-choice
+anchor -- before any refinement has run to spread them apart -- they routinely land on top of
+each other. Direct instrumentation at the OBB resolution site confirmed exactly this:
+```
+BUILDTIME-OBB-DEBUG: '4478' (prio=14.1647, repeatGroup=0) vs 'Matterhorn' (prio=14.1647,
+repeatGroup=17333836302624002845) -- winner: '4478'
+```
+Both labels tie exactly on priority (the elevation sub-label copies the icon's priority, same
+as the name). The tiebreak then falls through to comparing `repeatGroup` values numerically --
+and the elevation sub-label's `repeatGroup` is unconditionally forced to `0` (round 5/6's
+fix, `pointStyleBuilder.cpp`, to opt it out of the *runtime* repeat-group check), which always
+sorts below the name's real nonzero shared-draw-rule `repeatGroup` hash. So the elevation
+sub-label wins this collision **every time, deterministically**, and the name label is killed
+before real texture-shading/ridge-based anchor refinement -- which would have separated them
+onto different anchors, as it does successfully every subsequent frame for every other
+peak's already-*live* labels -- ever gets a chance to run. This is not history-dependent, not
+network-timing-dependent, and not proxy/frame-order-dependent: given the same tile data, it
+fires the same way every time, on every machine -- which resolves the original contradiction
+("consistently wins in headless testing" vs. "consistently missing for the user") once you
+notice the earlier round's headless verification predates the Task 1 name/elevation
+independent-placement split, and so never exercised this exact sibling pair.
+
+The `occludedLastFrame()` hysteresis from the v2 spec's leading hypothesis is real code with
+real history-dependent behavior, but was not implicated in this specific bug -- it was never
+reached, because the name label was already dead long before runtime collision resolution
+ever saw it. It remains a legitimate, separate structural concern (see "Known structural
+risks" in `docs/label-placement-v2-spec.md`) but is no longer this investigation's leading
+theory for *this* symptom.
+
+**Fix**: extended the existing "don't let relatives occlude their child" exemption in
+`LabelCollider::process()` to also cover sibling pairs sharing the same non-null `relative()`:
+```cpp
+if (l1->relative() == l2 || l2->relative() == l1 ||
+    (l1->relative() && l1->relative() == l2->relative())) {
+    continue;
+}
+```
+This is a minimal, narrowly-scoped fix directly targeting the confirmed mechanism -- it does
+not touch the repeat-group system, the priority model, or the runtime hysteresis at all.
+
+**Verification**: after the fix, the same headless instrumented run showed `'Matterhorn'`
+reaching `m_labels` (`priority=14.1647`) and settling to `visibleState=1, state=8` (visible,
+unoccluded) within a couple of frames -- previously absent entirely. All temporary
+instrumentation (in `pointStyleBuilder.cpp`, `labelManager.cpp`, and the extra `LOGW` calls in
+`labelCollider.cpp` beyond the fix itself) was reverted; only the sibling-exemption fix and
+its explanatory comment remain. `make -f tests.mk` passes (2031 assertions/185 cases,
+unchanged -- this fix isn't independently unit-testable without a real tile-build pipeline).
+Both `make DEBUG=1` and `make` (Release) build clean.
+
+```
+./build/Release/ascend --view.lat 45.9763 --view.lng 7.6586 --view.zoom 12.5 --view.rotation 0 --view.tilt 0 --sources.last_source stylus-osm-terrain
+./build/Debug/ascend   --view.lat 45.9763 --view.lng 7.6586 --view.zoom 12.5 --view.rotation 0 --view.tilt 0 --sources.last_source stylus-osm-terrain
+```
+
+**Not yet done, per the v2 spec's implementation order**: this fixes the confirmed root
+cause of the specific Matterhorn symptom, but the v2 spec's other items (tier/score data
+model split, a fully deterministic collision tiebreak replacing `occludedLastFrame()`, the
+still-real shared-`repeatGroup`-across-every-peak-name structural risk found in an earlier
+pass this session, and the anchor-sampling cost revisit) remain open and are being handed
+back to Sebastian for visual confirmation of this fix before continuing further into that
+larger, riskier body of work.
+
 ## Verification approach
 
 - Each phase: project builds clean (`make`, Release), relevant unit tests pass
