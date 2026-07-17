@@ -1082,6 +1082,295 @@ from the dot across many peaks, and noticeably more named peaks survive that pre
 would have lost a tile-build-time repeat-group cut. `make -f tests.mk`: 2024 assertions/184
 cases, all passing throughout.
 
+## Phase 7 follow-up round 6 (2026-07-16): Debug-vs-Release placement divergence
+
+Sebastian reported the Debug build (`build/Debug/ascend`) and Release build
+(`build/Release/ascend`) show genuinely different peak labels at the same location/zoom --
+concretely, Debug shows the Matterhorn's label in the cluttered Zermatt test view, Release
+doesn't (matching the "Matterhorn-specific anomaly" flagged as unresolved in round 4/the
+addendum above). Root-caused, not yet visually re-verified by Sebastian (see below).
+
+**Root cause**: `LabelManager::priorityComparator()`'s final tiebreak (`labelManager.cpp`,
+used to sort all labels by priority every frame before `handleOcclusions()` greedily assigns
+screen space) fell through, when every other criterion tied, to `return l1 < l2;` -- comparing
+the labels' raw heap addresses. Two same-style peak labels share one `hash()`
+(`m_options.paramHash`, a style/DrawRule param hash -- not feature-specific, so *every* peak
+label built from the one `peak:` draw rule collides here), so this address compare is the
+practical, everyday tiebreak for exactly the "two nearby peaks, tied priority" case -- either
+during the window before `Label::refinePriority()`'s texture-shading refinement completes (both
+still share the identical worst-in-tier provisional value from round 4), or permanently, when
+the texture-shading proxy genuinely can't separate two similarly rugged summits (round 4's own
+analysis already concluded this is likely for Matterhorn vs. its neighbors -- a real local-signal
+limitation, not a bug). Whichever label wins this tiebreak first also tends to keep winning
+afterward via the `occludedLastFrame()` hysteresis a few lines up (explicitly commented as
+"non-deterministic placement... depending on navigation history" -- an intentional
+flicker-reduction tradeoff, not itself new).
+
+Comparing raw addresses made that initial coin-flip **silently build-dependent**: `Label`'s
+`debugTag` member (`label.h`) only exists `#ifdef DEBUG`, so `sizeof(Label)` -- and every
+subclass built on it -- genuinely differs between Debug and Release, on top of the different
+heap allocation patterns `-O0` vs `-O2` produce everywhere else in the frame. Same input,
+same code, deterministically different tiebreak outcome per build.
+
+**Fix**: added `Label::id()`, a monotonic creation-order serial (`static std::atomic<uint32_t>`
+counter in `nextId()`, `label.h`), and changed the tiebreak to `l1->id() < l2->id()`. This
+removes the build/allocator dependency entirely; two labels built on the same TileWorker thread
+(the common case for two nearby peaks in the same or adjacent tile) now always tiebreak the same
+way regardless of build type. Cross-thread nondeterminism (two competing labels built by
+different tiles' worker threads completing in a different order) is a separate, harder,
+pre-existing problem the `occludedLastFrame()` comment already flags -- not attempted here.
+
+**Verification**: `make -f tests.mk` (2024 assertions/184 cases) and both `make DEBUG=0` and
+`make DEBUG=1` build clean. Per updated project policy (see repo root `CLAUDE.md`), no headless
+screenshot was taken -- this needs Sebastian's own visual check that Debug and Release now agree
+at the same Zermatt view. Exact commands to reproduce, both same test view used throughout this
+plan (see `CLAUDE.md` for the run-command template):
+
+```
+./build/Release/ascend --view.lat 45.9763 --view.lng 7.6586 --view.zoom 12.5
+./build/Debug/ascend   --view.lat 45.9763 --view.lng 7.6586 --view.zoom 12.5
+```
+
+**Not addressed by this fix, still open** (Sebastian's other reported symptom, likely present in
+both builds, not a Debug-vs-Release difference): peak dots showing with no visible label, or with
+the elevation number placed far enough from the dot that they don't read as belonging together.
+This needs its own investigation into `Label::refineAnchor()`/`anchorGapScale` -- not yet started.
+
+## Phase 7 follow-up round 7 (2026-07-16): viewport-relative regional isolation
+
+After round 6's fix, Sebastian confirmed Debug and Release now agree -- but the Matterhorn
+label was missing in *both*, confirming round 4's own analysis: the local texture-shading
+term genuinely can't separate "the one peak that dominates the whole valley" from "one of
+several similarly jagged neighbors," so it isn't a coin-flip anymore, the coin just always
+lands the same (wrong) way now.
+
+The original plan (round 4's "tractable middle ground") sketched fixed-radius ring sampling
+out to ~20km. Research into `RasterSource`/`ElevationManager` confirmed the *read* side is
+cheap and already-safe (same cache-only contract as the existing sampler), but the *write*
+side -- actively fetching coarse regional tiles for an arbitrary 20km radius around a peak
+that may not otherwise be visible -- has no existing path reachable from `Label::refinePriority()`
+without duplicating a chunk of `TileManager`'s fetch/dedup/backoff machinery (confirmed: the
+local cache had zero low-zoom tiles anywhere near Zermatt, so a cache-only version would have
+done nothing for the actual reported case).
+
+**Sebastian's own reframing avoided all of that**: use only the CURRENT VIEWPORT as the
+region, not a fixed real-world radius. This needs no new fetches at all -- elevation data for
+whatever's currently on screen is already loaded for hillshade/terrain rendering -- and it
+gives "relevant to current zoom level" for free: zoomed out, the viewport covers a huge
+real-world area, so only a genuinely regionally-dominant peak scores well; zoomed in, it's a
+small area and local peaks compete fairly. No explicit radius-vs-zoom formula needed, unlike
+round 4's original sketch.
+
+**Implementation, first attempt (superseded within this same round -- see the correction
+below)**: `ElevationManager::getMinMaxElev(TileID, ancestors)` already existed
+(`elevationManager.cpp`) -- cache-only, climbs toward coarser ancestor tiles until one is
+resident, memoized per-texture. `Label::isolationAncestorZoom(viewZoom, viewportMaxPixels,
+tileSize)` picked an ancestor zoom whose tile width roughly equals the viewport's larger
+screen dimension (`view_zoom - log2(viewport_tiles_across)`), and `Label::refinePriority()`
+computed that ancestor `TileID` at the peak's own world position and called `getMinMaxElev()`
+directly.
+
+**This didn't work.** Sebastian tested it: Matterhorn still showed only an elevation number,
+no name, and loading the same view had become "absurdly slow." Investigating the slowness
+(below) required real profiling, and while verifying the isolation term with the same
+technique (temporary instrumented builds, `ASCEND_PROFILE_SECONDS`-gated `Profiler` capture,
+`scripts/perf/summarize_trace.py`), a temporary hit/miss counter showed **0 hits, 900+ misses,
+always** at the computed ancestor zoom (9, for this view). Root cause: elevation raster tiles
+are only ever fetched matching the *vector* tile's own zoom (confirmed via the profiler's
+`stopZoomByMaxZoom:elevation` counter, pinned at 12 for this z12.5 view) -- nothing in the
+normal tile-loading pipeline ever independently loads a *coarser* elevation tile just because
+a peak's isolation check wants one. The ancestor tile computed by `isolationAncestorZoom()`
+was reliably never resident, so the entire isolation term had been a silent no-op the whole
+time; every peak's priority was identical to round 6's fresh shade-only value, Matterhorn
+included.
+
+**Corrected design**: don't gamble on a speculative ancestor tile at all -- use the elevation
+data that's *definitely* already resident, because it's needed for rendering the current
+frame anyway: the currently-visible tiles' own (native-zoom) elevation textures.
+`LabelManager::updateLabels()` now computes `viewportMaxElev` **once per frame** (not once per
+peak) by calling `getMinMaxElev(tile->getID(), 0)` -- ancestors=0, so no climbing, just "is
+this exact tile's own texture resident" -- for every tile in `_tiles` and taking the max
+across all of them; a tile with nothing resident (flat style, terrain off, not yet loaded) is
+skipped. This is both a correctness fix (data that's actually there) and a performance win
+(one aggregation per frame instead of one attempted ancestor-lookup per peak).
+`Label::refinePriority()`'s signature changed from taking `const ViewState&` (used only to
+derive the now-deleted ancestor zoom) to taking the precomputed `float viewportMaxElev, bool
+haveViewportMaxElev` directly; `isolationAncestorZoom()` and its unit tests were removed as
+dead code. `Label::isolationScore()` (pure, unit-tested: 1.0 at/above the max, ramping to 0.0
+over a tunable margin below it) is unchanged, now fed the real per-frame viewport max instead
+of a phantom ancestor tile's. Verified via the same temporary hit/miss counter: 4 hits, 0
+misses, real nonzero scores (e.g. `peakElev=4380 viewportMax=4613 isolation=0.223`) in the
+Zermatt test view.
+
+Blended additively with the existing `compressTextureShading()` term as originally planned
+(`kIsolationWeight = 0.15`, tune by eye), clamped so the combined compression can't spill past
+the half-tier band width. Best-effort throughout: if no visible tile has elevation data, or
+this peak's own elevation isn't available, isolation contributes 0 -- never a hard requirement
+gating finalization, unlike the shade sample. Evaluated once and latched
+(`m_prominenceRefined`), same one-time-snapshot behavior as the shade term (Frozen Interface
+Contract: priority must not change as the camera moves) -- so this peak's isolation score
+reflects whatever the viewport's max elevation happened to be the frame refinement first
+succeeded, not a live-updating value.
+
+**Answering Sebastian's side question** ("maybe isolation already captures ridges being less
+prominent"): no -- isolation and local shape (the existing texture-shading term) are
+different, complementary signals. A ridge's topmost bump can be regionally dominant (nothing
+else nearby is higher) while still reading as a flat/saddle-shaped ridge crest rather than a
+convex spike in the local curvature term. Blending both (not replacing) means a peak needs to
+*both* look locally spiky *and* actually stand out regionally to rank highest -- which is what
+was already planned, not a new mechanism.
+
+**Known limitations, not attempted**: if none of the currently-visible tiles have elevation
+data resident on the exact frame a given peak's shade-refinement first succeeds, isolation is
+permanently skipped for that peak (no separate retry flag was added, to avoid a third latch
+mirroring `m_prominenceRefined`/`m_anchorRefined`) -- in practice this only matters very early
+in a session, before any terrain tiles have loaded at all.
+
+## Phase 7 follow-up round 8 (2026-07-16): the real "absurdly slow to load" bug
+
+Investigating the slowness Sebastian reported (see round 7 above) required actual profiling,
+not more speculation -- built a temporary env-var-gated hook
+(`ASCEND_PROFILE_SECONDS`, `linuxmain.cpp`, reverted after use) to drive the existing
+`Profiler`/`scripts/perf/summarize_trace.py` infrastructure headlessly, since the debug-menu
+checkbox that normally starts a capture isn't reachable without clicking a real GUI. First
+finding: a single frame took **25.5 seconds**, with `LabelsCollect` (the scope wrapping
+`LabelManager::updateLabels()`, where all per-label refinement happens) accounting for 92%+ of
+it. A/B test with round 7's isolation code fully disabled (`if (false)`) showed the exact same
+stall persisted (44.8s that run) -- **not round 7's code**, a pre-existing bug, most likely
+already present after round 6 too, just not something anyone had profiled at this specific
+"extremely cluttered" Zermatt view (2659 peak labels active per the `labelsActive` counter --
+far more than any earlier test location).
+
+**Root cause**: `sampleTextureShadingAtMosaic()` (`textureShading.cpp`) decodes the whole
+mosaic buffer to float and builds a `kMaxLevels`-deep box-filter pyramid from scratch on
+*every single call* -- and its own comment already flagged this as a known, unimplemented gap
+("this runs at most once per peak in the common case"). That assumption was wrong:
+`Label::refineAnchor()` (Task 4, an earlier round) calls it up to ~45 times per peak (5 sample
+points x up to 9 anchors), all against the identical mosaic. With ~2659 peaks each paying a
+~35M-float-op rebuild up to 45 times, this is tens of billions of redundant operations in one
+frame -- exactly the observed magnitude.
+
+**Fix**: none of the pyramid-building work depends on the specific sample point (only on the
+mosaic's own pixel data), so it's factored out into `buildPyramid()`/`sampleFromPyramid()`
+(anonymous namespace, `textureShading.cpp`). `sampleTextureShadingAtMosaic()` (the Frozen
+Interface Contract's pinned, directly-unit-tested signature) is unchanged in behavior --
+still rebuilds every call, since its only callers are unit tests. The actual hot path,
+`sampleTextureShading(RasterSource&, ...)`, gets a single-slot cache keyed by a
+`std::weak_ptr<Texture>` (not a raw pointer -- a destroyed/replaced mosaic, e.g. from a fresh
+stitch, must never be mistaken for a live one) so consecutive calls against the same mosaic
+(the overwhelmingly common case: one peak's own ~46 calls, or several nearby peaks sharing one
+tile) reuse the cached pyramid instead of rebuilding it.
+
+**Result**: worst-case frame in the same Zermatt view dropped from ~25-45 seconds to ~5.7
+seconds (with *more* peaks active this run, 2659 vs the earlier 527) -- roughly an order of
+magnitude. The remaining cost is now comparable in magnitude to hillshade's GPU cost, which is
+a separate, already-tracked issue (see the profiling-system memory/prior session's GPU
+findings) -- not chased further here.
+
+**Verification**: `make -f tests.mk` (2031 assertions/185 cases -- down slightly from round
+7's count, from removing the now-dead `isolationAncestorZoom` tests) and both
+`make DEBUG=0`/`make DEBUG=1` build clean. Profiling was done with temporary instrumentation
+(env-var hook in `linuxmain.cpp`, ad hoc `PROFILE_SCOPE`s in `label.cpp`), all reverted before
+finishing -- no permanent new tooling was added, per the "minimal diff" approach. Per
+`CLAUDE.md` policy, no headless screenshot was taken for the label-placement question itself --
+needs Sebastian's own visual check that the Matterhorn (and the East/West Lions, a second
+real-world test case) now outrank non-dominant neighbors, and that loading feels reasonable.
+Same run commands as round 6/7:
+
+```
+./build/Release/ascend --view.lat 45.9763 --view.lng 7.6586 --view.zoom 12.5
+./build/Debug/ascend   --view.lat 45.9763 --view.lng 7.6586 --view.zoom 12.5
+./build/Release/ascend --view.lat 49.38 --view.lng -123.20 --view.zoom 13
+```
+
+**Tunables needing Sebastian's own visual judgment**: `kIsolationWeight` (0.15) and
+`kIsolationMarginMeters` (300m), both in `label.cpp` -- reasoned starting points, not tuned
+against a specific screenshot comparison.
+
+## Phase 7 follow-up round 9 (2026-07-16): loading still slow; the real Matterhorn story
+
+Sebastian tested round 8's fix: still slow, Matterhorn still no name label. Both needed
+another, harder look -- round 8's fix was real but insufficient, and round 7-9's isolation
+work turned out to be solving the wrong problem for Matterhorn specifically.
+
+### The real remaining perf bug: too much per-frame work, not just expensive-per-call work
+
+Round 8 made each `sampleTextureShading()` call cheap (cached pyramid) but didn't reduce how
+many calls happen. Re-profiled with real numbers: a Debug-build run at the same Zermatt view
+hit a single frame that took **98 seconds** (`LabelsCollect` alone: 77s), confirmed via the
+same temporary `ASCEND_PROFILE_SECONDS` profiler hook as round 8. With `labelsActive` up to
+2659 in this cluttered view, and `Label::refineAnchor()` doing up to ~45 (now individually
+cheap) samples per peak, the sheer count -- tens of thousands of calls converging in the same
+frame -- was still enough to stall for many seconds (Release) to well over a minute (Debug,
+`-O0`, no optimization at all).
+
+**Fix**: spread the one-time refinement cost across multiple frames instead of doing it all
+at once. New `LabelManager::m_anchorRefineBudget` (labelManager.h/.cpp), reset to
+`kMaxAnchorRefinementsPerFrame = 150` (tune by eye) at the top of every `updateLabels()` call,
+decremented each time `refineAnchor()` actually runs for a label; once exhausted, remaining
+labels simply wait for a later frame (same "retry every frame until success" idiom
+`m_anchorRefined` already used, just now frame-budget-gated too). Safety: when the budget is
+exhausted while labels are still waiting, `m_needUpdate` is set so the app keeps requesting
+frames until everything settles -- without this, a session that stops moving the camera right
+as the budget runs out could leave labels permanently stuck unrefined.
+
+**Result, re-profiled with the fix**: `LabelsCollect` no longer appears in the top zones by
+time at all (down from 77s to well under 100ms aggregate across many frames in the same test).
+The dominant remaining cost is now `style:hillshade`/`style-gpu:hillshade` -- GPU rendering,
+not label refinement, and a separate, already-known issue from earlier profiling work, not
+something this plan's work introduced or can fix here.
+
+**Confound found while re-testing**: the app persists camera `rotation`/`tilt` across
+sessions (`view.rotation`/`view.tilt` in config, same mechanism as `view.lng`/`lat`/`zoom`,
+`mapsapp.cpp`). A leftover tilted/rotated camera state from earlier testing this session
+(`rot=302.4deg tilt=53.1deg`) was inflating render cost and changing which area was actually
+visible, confounding earlier comparisons. Pass `--view.rotation 0 --view.tilt 0` explicitly
+for reproducible testing -- added to `CLAUDE.md`'s run-command template. With a clean
+(untilted) camera, the same view's worst frame was 2.5s, entirely GPU/hillshade-bound, no
+label cost at all.
+
+### The real Matterhorn story: it already had real prominence data
+
+All of rounds 7-9's isolation work is for peaks that **lack** a real OSM `prominence` tag --
+Phase 2 (long before this session) already suppresses `refinePriorityWithTextureShading` for
+any peak where `feature.prominence` is present, since the real tag drives a final priority
+directly at tile-build time with no refinement needed at all. Decoded the actual vector tile
+covering Zermatt (`assets/cache/stylus-osm.mbtiles`, z12/x2135/y2638, hand-rolled a minimal
+protobuf/MVT parser since no Python MVT library was available) to check Matterhorn's real
+tags directly rather than continuing to guess from a slow, unreliable live-Debug-build
+diagnostic (which was taking minutes per attempt and repeatedly timing out on tile loading
+in this sandboxed environment): **`osm_id=26863664`, `natural=peak`, `name=Matterhorn`,
+`ele=4478`, `prominence=1038`.**
+
+This means Matterhorn's priority has been driven by real, substantial, correct prominence
+data the entire time, via a code path this session never touched. The isolation term (rounds
+7-9) was never in the running to explain why it's missing a label -- it doesn't even run for
+this peak. Whatever is actually suppressing Matterhorn's label is a **different** bug,
+already flagged as an open anomaly back in round 4/the round-3-addendum ("some very prominent
+named peaks -- the Matterhorn itself, specifically -- still don't get a name label... likely
+an ordinary priority/collision loss in a uniquely cluttered spot... not yet root-caused") --
+i.e. this predates this session's isolation work entirely and needs its own separate
+investigation (most likely something about collision against nearby hut/piste/trail labels,
+or a draw-tier/priority-comparison interaction between peaks and other label types, not
+peak-vs-peak ranking). Not investigated further this round -- flagged for its own pass.
+
+**Verification**: `make -f tests.mk` (2031 assertions/185 cases, unchanged from round 7/8 --
+this round added no new pure-testable logic, only the frame-budget mechanism, which isn't
+independently unit-testable without a real `LabelManager`/`Scene`) and both `make DEBUG=0`/
+`make DEBUG=1` build clean. All temporary diagnostics (profiler hook, ad hoc `LOGW`s, the MVT
+decode script) were removed/left outside the repo; nothing permanent added beyond the budget
+mechanism itself. Updated run commands (now resetting rotation/tilt):
+
+```
+./build/Release/ascend --view.lat 45.9763 --view.lng 7.6586 --view.zoom 12.5 --view.rotation 0 --view.tilt 0
+./build/Debug/ascend   --view.lat 45.9763 --view.lng 7.6586 --view.zoom 12.5 --view.rotation 0 --view.tilt 0
+```
+
+**Tunable needing Sebastian's own visual/perf judgment**: `kMaxAnchorRefinementsPerFrame`
+(150, `labelManager.cpp`) -- larger settles faster but risks longer per-frame stalls; smaller
+is gentler per-frame but takes more frames (and hence longer wall-clock time while the camera
+is still, before `m_needUpdate` stops mattering) to fully settle.
+
 ## Verification approach
 
 - Each phase: project builds clean (`make`, Release), relevant unit tests pass
