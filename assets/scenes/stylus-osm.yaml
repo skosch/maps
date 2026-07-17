@@ -2103,6 +2103,17 @@ layers:
                   // primary above now returns "" when there's no name instead, so this is
                   // unconditionally the only place elevation ever renders, in a font that
                   // reads as "just a data point," not a summit name.
+                  //
+                  // Guard added 2026-07-17 (Phase 7 round 10 follow-up, "naked dot"
+                  // investigation): a peak can pass this rule's own candidacy filter via a
+                  // real `wikipedia`/`prominence` tag alone, with no `ele` tag at all -- for
+                  // such a feature `feature.ele` is undefined, and calling `.toFixed()` on
+                  // it used to throw (caught, but silently, one EvalFilterFn error log per
+                  // candidate, every frame). Return "" explicitly instead, matching the
+                  // primary label's own no-content pattern above -- PointStyleBuilder::
+                  // addFeature() (pointStyleBuilder.cpp) now kills the icon outright when
+                  // this label ends up with no content, so a naked dot can no longer result.
+                  if (feature.ele === undefined || feature.ele === null) { return ""; }
                   const ele = global.metric_units ? feature.ele : feature.ele*3.2808399;
                   return ele.toFixed(0);
               }

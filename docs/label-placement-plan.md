@@ -1482,6 +1482,65 @@ pass this session, and the anchor-sampling cost revisit) remain open and are bei
 back to Sebastian for visual confirmation of this fix before continuing further into that
 larger, riskier body of work.
 
+## Phase 7 follow-up round 11 (2026-07-17): naked dots, a second real bug from the same investigation
+
+Sebastian confirmed the Matterhorn fix but reported a new symptom while looking: "some dots
+without elevations or names." Investigated with the same log-instrumentation method (a
+temporary per-frame census comparing every visible peak icon against whether any of its
+children were also visible, headless Xvfb run at the Zermatt coordinates) rather than
+guessing from a screenshot.
+
+**Finding**: every "naked" icon had **zero** children in `LabelManager::m_labels` at all —
+not children that lost a real collision. Traced to `PointStyleBuilder::addFeature()`
+(pointStyleBuilder.cpp): the icon is built unconditionally, before the elevation sub-label
+(`text2`) is even attempted. The peak candidacy filter allows a feature through via a real
+`wikipedia` or `prominence` tag alone, with no `ele` requirement — so a real candidate peak
+can legitimately have no `ele` tag at all. `text2`'s `text_source` function
+(`stylus-osm.yaml`) unconditionally called `feature.ele.toFixed(0)`, which throws when
+`feature.ele` is `undefined`; the JS call is wrapped in a protected call
+(`DuktapeContext.cpp`'s `duk_pcall`) so this doesn't crash, but it does silently produce
+empty text (plus a per-frame `EvalFilterFn` error log) — meaning `text2` is never built at
+all for that feature. The existing "icon requires elevation to show" cascades
+(`LabelCollider::killOccludedLabels()` / `LabelManager::handleOcclusions()`) only handle
+"the elevation label was built but then lost a collision" — neither handles "the elevation
+label was never attempted in the first place," so the icon, having no non-optional child to
+gate it, showed alone.
+
+**Fix, two parts**:
+1. `stylus-osm.yaml`'s `text2` `text_source` now explicitly returns `""` when `feature.ele`
+   is missing, matching the guard the primary (`text:`) label already had for a missing
+   name.
+2. `PointStyleBuilder::addFeature()` now kills the icon(s) directly whenever the elevation
+   sub-label fails to build at all (empty text or `prepareLabel()` failure) — the
+   structurally-missing complement to the existing "kill icon if elevation label built but
+   got occluded" cascades.
+
+**A related, not-yet-observed-live but clearly analogous latent bug, fixed defensively**:
+while investigating, noticed `LabelManager::handleOcclusions()`'s per-frame OBB collision
+loop has the exact same sibling-exemption gap that round 10's build-time fix addressed —
+it exempts a label from colliding with its own icon, but not from colliding with a sibling
+that shares that icon. Extended the same fix there too
+(`l->relative() == other_label->relative()`), since a peak's name and elevation labels can
+just as plausibly still land on the same anchor at runtime (e.g. before
+`Label::refineAnchor()`'s ridge-aware refinement has had its turn) as they can at
+tile-build time.
+
+**Verification**: a repeat of the same live per-frame census, before/after, across
+multiple headless runs at the Zermatt coordinates (up to 818 visible peak icons observed
+in a single frame) — 0 naked dots after the fix, versus 10-46 before (climbing as more
+tiles loaded, i.e. a real and growing symptom, not noise). All temporary instrumentation
+reverted. `make -f tests.mk` still passes (2031 assertions/185 cases — this fix isn't
+independently unit-testable without a real tile-build pipeline). Both `make DEBUG=1` and
+`make` (Release) build clean. Same run commands as round 10 apply.
+
+**Worth flagging to Sebastian**: this fix means a real, wikipedia/prominence-backed peak
+that genuinely has no `ele` tag in OSM will now show *nothing at all* (previously: a bare
+dot) — this is what the existing design comment already stated as intended ("the icon
+strictly requires a successfully-placed ELEVATION to show at all"), just not previously
+enforced for this specific gap. If that's not actually the desired behavior for this rare
+case, it's a one-line policy call (e.g. let the icon show alone when a real
+`prominence`/`wikipedia` tag is present even without `ele`), not a further investigation.
+
 ## Verification approach
 
 - Each phase: project builds clean (`make`, Release), relevant unit tests pass
