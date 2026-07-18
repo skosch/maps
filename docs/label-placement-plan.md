@@ -1780,7 +1780,13 @@ more downsampled grid from it) -- its benefit would be narrower than originally 
 reducing repeated-sample overhead on an *already-cached* mosaic, which round 8 already made
 cheap. Left for Sebastian's call on whether the added architecture (a new cached grid,
 `textureShading.cpp`, plus rewiring `anchorCandidateCost()`/`refineAnchor()` to read from it)
-is still worth pursuing given this.
+is still worth pursuing given this. **Decided: skip it** -- Sebastian agreed the expected
+win doesn't justify the added architecture given where the real cost lives. This closes out
+every item in `docs/label-placement-v2-spec.md`'s suggested implementation order (root
+cause, tier/score fix, deterministic collision, repeatGroup risk, anchor-sampling cost) --
+the v2 spec is now fully addressed, modulo the deliberately-deferred name/elevation
+relative-placement question (round 14's closing note) which is its own separate, real,
+open item for a future session.
 
 **Verified**: `make -f tests.mk` still 2037 assertions/186 cases, both `make DEBUG=1` and
 `make` (Release) build clean. All temporary instrumentation reverted.
