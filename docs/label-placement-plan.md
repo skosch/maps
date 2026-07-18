@@ -1602,6 +1602,82 @@ overlaps across multiple headless runs at the Zermatt coordinates.
 ./build/Debug/ascend   --view.lat 45.9763 --view.lng 7.6586 --view.zoom 12.5 --view.rotation 0 --view.tilt 0 --sources.last_source stylus-osm-terrain
 ```
 
+## Phase 7 round 13 (2026-07-17/18): the v2 spec's remaining structural risks
+
+With rounds 10-12 having resolved every reported symptom, this round continued the v2
+spec's own suggested implementation order (`docs/label-placement-v2-spec.md`) into its
+three remaining structural-risk items, without waiting for a new bug report.
+
+**The `nearbyint` tier-bucketing risk**: `LabelManager::priorityComparator()`'s tier
+extraction used `std::nearbyint()` (round-half-to-even), which could round an unnamed
+peak's fractional priority (`[14.5, 14.9]`) up into `saddle`'s tier (`15`) for any
+fraction above the `.5` tie point, silently misclassifying it into the wrong coarse
+category. The spec offered two fixes -- a full `{tier, score}` data-model split, or the
+narrower `floor()`-based extraction (matching how `Label::refinePriority()` already
+extracts its own half-tier floor). Chose the latter: `priority` remains a single float end
+to end (JS/YAML interface unchanged), but the ONE line that decided "which coarse tier" now
+uses `std::floor()`, which has no rounding-direction edge case -- every value in a tier's
+`[N.0, N.9]` band floors to exactly `N`. A full data-model refactor was deliberately not
+attempted: `priority` is a scene-wide mechanism (every draw rule, not just peaks), and the
+`floor()` fix eliminates the actual confirmed bug with a one-line, obviously-correct
+change instead of a large-blast-radius rewrite across `Label::Options`, every
+`priorityComparator`, `refinePriority()`, and the JS/C++ interface.
+
+**Deterministic-but-not-jittery collision resolution (Option A)**: the `occludedLastFrame()`
+hysteresis tiebreak really is real, confirmed non-deterministic-placement behavior (just not
+what caused the Matterhorn symptom specifically -- see round 10). It asked "did this label
+win the single previous frame," which is true the instant a label wins even once by pure
+incidental timing (tile arrival order), and then perpetuates itself indefinitely once true.
+Replaced with a genuine track record: new `Label::stableFrames()` (label.h/cpp) counts
+consecutive frames a label has stayed continuously unoccluded, reset to 0 the moment it's
+occluded. `priorityComparator()` now requires a label to have been stable for
+`kStableFramesThreshold` (5) consecutive frames before its history is allowed to outweigh a
+competitor's tier/score. The key property: for as long as NEITHER competitor is yet stable
+(every frame during initial load, before either has proven anything), this check is a
+no-op and the tiebreak falls through to the fully deterministic `(tier, score, hash, id)`
+chain below it -- which gives the identical answer every single frame given fixed inputs,
+so whichever candidate is genuinely better by that chain wins from frame one and
+accumulates stability consistently, never incidentally. Once a label does reach stability,
+it's still protected from flickering out if a competitor's score later improves (e.g.
+texture-shading refinement completing) -- the actual anti-flicker property this mechanism
+exists for, now decoupled from incidental history. Added the unit test the spec explicitly
+asked for ("the single most important new test this redesign should add"): `LabelManager::
+LabelEntry`/`priorityComparator` were `protected`, moved to `public` (both are stateless --
+a plain struct and a static pure function) specifically so `tests/unit/labelTests.cpp` can
+construct fixed label pairs and assert the comparator's decision is unaffected by a single
+lucky win, while still respecting a genuine multi-frame track record.
+
+**Shared `repeatGroup` across every same-draw-rule peak**: confirmed still present (found
+in an earlier pass, never fixed until now) -- the peak's primary NAME label
+(`stylus-osm.yaml`'s `text:` block) was the one label of the three (icon, name, elevation)
+that had never been given the same treatment its siblings already got: the icon has
+`repeat_distance: 0` (round 5) and the elevation sub-label is zeroed in C++
+(`PointStyleBuilder::addFeature()`, round 5/6) -- but the name label still defaulted to the
+~256px `repeatDistance` and a `repeatGroup` shared by literally every peak using this rule
+(`TextStyleBuilder::applyRule()`'s fallback is a hash over style parameters, not per-feature
+content). Fixed identically to its siblings: added `text_repeat_distance: 0`, so
+deduplicating genuinely-overlapping names is left entirely to the real per-anchor OBB
+collision pass, which runs after texture-shading refinement and correctly favors the truly
+more prominent peak.
+
+**Verification**: `make -f tests.mk` now 2037 assertions/186 cases (6 new assertions from
+the determinism test), both `make DEBUG=1` and `make` (Release) build clean. Repeated
+headless runs at the Zermatt coordinates (up to 747 visible peak icons) after the
+`repeatGroup` fix: 0 naked dots, 0 sibling overlaps (same corrected `screenCenter() +
+m_anchor` measurement as round 12), and Matterhorn's name label still visible -- confirming
+none of rounds 10-12's fixes regressed. All temporary verification instrumentation
+reverted.
+
+```
+./build/Release/ascend --view.lat 45.9763 --view.lng 7.6586 --view.zoom 12.5 --view.rotation 0 --view.tilt 0 --sources.last_source stylus-osm-terrain
+./build/Debug/ascend   --view.lat 45.9763 --view.lng 7.6586 --view.zoom 12.5 --view.rotation 0 --view.tilt 0 --sources.last_source stylus-osm-terrain
+```
+
+**Not attempted, per the v2 spec's own "only then, if still needed" framing**: the
+anchor-sampling cost revisit (precomputed ridge-cost field, time-based rather than
+count-based per-frame budget) -- explicitly the lowest-priority item in the spec's
+suggested order, and no new performance symptom has been reported since round 9's fix.
+
 ## Verification approach
 
 - Each phase: project builds clean (`make`, Release), relevant unit tests pass

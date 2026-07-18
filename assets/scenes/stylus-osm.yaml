@@ -2056,6 +2056,25 @@ layers:
           text:
             optional: true
             anchor_gap_scale: 0.25
+            # Phase 7 round 13 (2026-07-17, docs/label-placement-v2-spec.md's "shared
+            # repeatGroup across every same-draw-rule peak" risk): unlike this rule's own
+            # icon (repeat_distance: 0, see the points: block's own comment) and text2/
+            # elevation (zeroed in PointStyleBuilder::addFeature(), pointStyleBuilder.cpp),
+            # the name label itself was never given the same treatment -- it was still
+            # defaulting to the ~256px repeatDistance and a repeatGroup shared by literally
+            # every peak using this rule (TextStyleBuilder::applyRule()'s fallback,
+            # `_rule.getParamSetHash()`, is over style parameters, not per-feature
+            # content). That means any two peaks' NAMES within 256 screen px of each other
+            # mutually excluded unconditionally, using only provisional pre-refinement
+            # priority at tile-build time (LabelCollider::filterRepeatGroups()) -- the exact
+            # same class of bug already fixed for the icon and elevation sub-label, just
+            # never applied to the label most likely to actually collide (it's the widest
+            # of the three). Disabled for the same reason round 5 disabled it for the icon:
+            # deduplicating genuinely-overlapping labels is left entirely to the real
+            # per-anchor OBB collision pass (LabelManager::handleOcclusions()), which runs
+            # AFTER texture-shading refinement and correctly favors the truly more prominent
+            # peak, instead of a crude provisional-priority guess.
+            text_repeat_distance: 0
             text_source: |
               function() {
                   // Revised 2026-07-16 after user report: this used to fall back to
