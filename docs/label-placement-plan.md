@@ -1678,6 +1678,64 @@ anchor-sampling cost revisit (precomputed ridge-cost field, time-based rather th
 count-based per-frame budget) -- explicitly the lowest-priority item in the spec's
 suggested order, and no new performance symptom has been reported since round 9's fix.
 
+## Phase 7 round 14 (2026-07-18): real-prominence vs. texture-shading-refined peaks were on opposite scales
+
+Sebastian confirmed round 13's fixes but reported a new, real symptom while looking further:
+at `--view.lat 45.9763 --view.lng 7.6586 --view.zoom 13.0`, **Pic Tyndall** (a subsidiary
+rock shoulder on the Matterhorn's own Lion Ridge) was consistently winning the label over
+**Matterhorn itself** -- backwards from any reasonable prominence ordering.
+
+**Root cause, confirmed with real data** (decoded via the same `ogrinfo`-against-gunzipped-
+MVT method as round 10): Pic Tyndall has `ele=4241` but **no real `prominence` tag** --
+unlike Matterhorn (`prominence=1038`), it only clears peak candidacy via the elevation
+floor. This means Pic Tyndall's priority runs through `Label::refinePriority()`'s
+texture-shading path (Matterhorn's real tag means `suppressTextureShadingIfProminent()`
+skips this refinement for it entirely -- refinement never even runs). Reading
+`refinePriority()`'s formula closely: `m_options.priority = bandFloor - compression` --
+this places every texture-shading-refined peak **at or below** its band floor (e.g.
+`[13.61, 14.0]` for the named-peak band). Meanwhile the real-prominence formula (this
+draw rule's own `priority:` JS function) is strictly **additive** from the same band floor
+-- `base + badness*0.4`, always `>= bandFloor`. Since a peak with a real prominence tag
+never gets texture-shading-refined at all, this meant a hard, authoritative real-world
+signal was being numerically compared against a soft proxy guess on two **non-overlapping**
+ranges that merely share a tier label -- the proxy wins unless it reads as literally the
+worst possible case, a direct inversion of the intended design. Confirmed the exact
+mechanism live: Matterhorn's fixed priority is `14.1647`; Pic Tyndall's real behavior before
+the fix, checked via temporary instrumentation, showed a refined priority of roughly
+`13.9-14.0` -- a steep, spire-like local texture-shading signal (unsurprising: it's a
+famous, dramatic rock tower) plus a nontrivial isolation-term contribution (its elevation
+sits only ~237m below the viewport's max, comfortably inside the 300m isolation-ramp
+margin) -- comfortably beating Matterhorn's fixed value despite being an objectively far
+less prominent peak.
+
+**Fix** (`Label::refinePriority()`, label.cpp): moved the refined range to
+`[bandFloor, bandFloor + 0.39]` -- the same additive-badness direction and overlapping
+range the real-prominence formula already uses -- by changing `bandFloor - compression` to
+`bandFloor + (0.39f - compression)`. This is a **pure constant shift** (`+0.39`) relative to
+the old formula, so relative ordering among peaks that are ALL texture-shading-refined (no
+real prominence tag on either side) is completely unaffected -- only cross-path comparisons
+(a peak with a real tag vs. one running on the proxy) change, which is exactly the bug. A
+real, hard prominence signal can now only lose to a refined proxy that reads as genuinely
+comparable, never merely because the two paths live on different numeric scales.
+
+**Verified**: after the fix, live headless instrumentation at the exact reported coordinates
+confirmed Matterhorn's priority unchanged (`14.1647`, fixed, never refined) and Pic
+Tyndall's refined priority now `14.2976` (correctly worse) -- `visibleState=1,
+occluded=0` for Matterhorn, `visibleState=0, occluded=1` for Pic Tyndall. `make -f tests.mk`
+still 2037 assertions/186 cases (no test asserted the old formula's literal numbers), both
+`make DEBUG=1` and `make` (Release) build clean. Spot-checked the Lions/Cypress area
+(`--view.lat 49.38 --view.lng -123.20 --view.zoom 13`) for regressions: zero errors. All
+temporary instrumentation reverted.
+
+```
+./build/Release/ascend --view.lat 45.9763 --view.lng 7.6586 --view.zoom 13.0 --view.rotation 0 --view.tilt 0 --sources.last_source stylus-osm-terrain
+./build/Debug/ascend   --view.lat 45.9763 --view.lng 7.6586 --view.zoom 13.0 --view.rotation 0 --view.tilt 0 --sources.last_source stylus-osm-terrain
+```
+
+**Explicitly deferred, per Sebastian's own framing ("we'll leave this for a next step")**:
+how name and elevation sub-labels are placed relative to one another and relative to the
+peak icon (distance, stacking) is a separate, real, open item -- not attempted this round.
+
 ## Verification approach
 
 - Each phase: project builds clean (`make`, Release), relevant unit tests pass
