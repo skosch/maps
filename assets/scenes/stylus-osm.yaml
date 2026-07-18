@@ -16,7 +16,12 @@ global:
   #elevation_sources: []
   marker_font: IBM Plex Sans
   # Open Sans looks very good, especially the italic style
-  primary_font: IBM Plex Sans
+  primary_font: Reforma2018 #IBM Plex Sans
+  # Imhof-style split: serif for natural/physical features (peaks, water, vegetation,
+  # landforms), sans (primary_font, above) for everything man-made (roads, buildings,
+  # settlements, admin boundaries). Water/waterway names additionally set style: italic
+  # at their own draw rules -- this var only carries the family.
+  natural_font: Reforma1969 #IBM Plex Serif
   bold_weight: 600 # use instead of "bold" to avoid checking for OS font if we only have semibold
 
   # docs/label-placement-plan.md Task 3 (revised 2026-07-15): peak label SALIENCE (does this
@@ -490,16 +495,69 @@ fonts:
       style: italic
       url: /home/sebastian/.fonts/IBM-Plex-Sans/IBMPlexSans-Italic.otf
     - weight: 600
-      url: /home/sebastian/.fonts/IBM-Plex-Sans/IBMPlexSans-SemiBoldItalic.otf
-  IBM Plex Sans Condensed:
-    - weight: 600
-      url: ../shared/fonts/IBMPlexSans_Condensed-SemiBold.ttf
-    - weight: 400
-      url: ../shared/fonts/IBMPlexSans_Condensed-Regular.ttf
+      url: /home/sebastian/.fonts/IBM-Plex-Sans/IBMPlexSans-SemiBold.otf
   IBM Plex Serif:
+    - weight: 400
+      url: ../shared/fonts/IBMPlexSerif-Regular.otf
     - weight: 400
       style: italic
       url: ../shared/fonts/IBMPlexSerif-Italic.otf
+    - weight: 600
+      url: ../shared/fonts/IBMPlexSerif-SemiBold.otf
+  IBM Plex Mono:
+    - weight: 400
+      url: ../shared/fonts/IBMPlexMono-Regular.otf
+  Reforma1918:
+    - weight: 400
+      url: "/home/sebastian/.fonts/Reforma/Reforma%20Desktop/Reforma%201918/Reforma1918-Blanca.otf"
+    - weight: 500
+      url: /home/sebastian/.fonts/Reforma/Reforma%20Desktop/Reforma%201918/Reforma1918-Gris.otf
+    - weight: 600
+      url: /home/sebastian/.fonts/Reforma/Reforma%20Desktop/Reforma%201918/Reforma1918-Negra.otf
+    - weight: 400
+      style: italic
+      url: /home/sebastian/.fonts/Reforma/Reforma%20Desktop/Reforma%201918/Reforma1918-BlancaItalica.otf
+    - weight: 500
+      style: italic
+      url: /home/sebastian/.fonts/Reforma/Reforma%20Desktop/Reforma%201918/Reforma1918-GrisItalica.otf
+    - weight: 600
+      style: italic
+      url: /home/sebastian/.fonts/Reforma/Reforma%20Desktop/Reforma%201918/Reforma1918-NegraItalica.otf
+
+  Reforma1969:
+    - weight: 400
+      url: "/home/sebastian/.fonts/Reforma/Reforma%20Desktop/Reforma%201969/Reforma1969-Blanca.otf"
+    - weight: 500
+      url: /home/sebastian/.fonts/Reforma/Reforma%20Desktop/Reforma%201969/Reforma1969-Gris.otf
+    - weight: 600
+      url: /home/sebastian/.fonts/Reforma/Reforma%20Desktop/Reforma%201969/Reforma1969-Negra.otf
+    - weight: 400
+      style: italic
+      url: /home/sebastian/.fonts/Reforma/Reforma%20Desktop/Reforma%201969/Reforma1969-BlancaItalica.otf
+    - weight: 500
+      style: italic
+      url: /home/sebastian/.fonts/Reforma/Reforma%20Desktop/Reforma%201969/Reforma1969-GrisItalica.otf
+    - weight: 600
+      style: italic
+      url: /home/sebastian/.fonts/Reforma/Reforma%20Desktop/Reforma%201969/Reforma1969-NegraItalica.otf
+
+
+  Reforma2018:
+    - weight: 400
+      url: "/home/sebastian/.fonts/Reforma/Reforma%20Desktop/Reforma%202018/Reforma2018-Blanca.otf"
+    - weight: 500
+      url: /home/sebastian/.fonts/Reforma/Reforma%20Desktop/Reforma%202018/Reforma2018-Gris.otf
+    - weight: 600
+      url: /home/sebastian/.fonts/Reforma/Reforma%20Desktop/Reforma%202018/Reforma2018-Negra.otf
+    - weight: 400
+      style: italic
+      url: /home/sebastian/.fonts/Reforma/Reforma%20Desktop/Reforma%202018/Reforma2018-BlancaItalica.otf
+    - weight: 500
+      style: italic
+      url: /home/sebastian/.fonts/Reforma/Reforma%20Desktop/Reforma%202018/Reforma2018-GrisItalica.otf
+    - weight: 600
+      style: italic
+      url: /home/sebastian/.fonts/Reforma/Reforma%20Desktop/Reforma%202018/Reforma2018-NegraItalica.otf
 
 scene:
   background:
@@ -818,7 +876,7 @@ layers:
         max_lines: 4
         priority: global.priority.forest
         font:
-          family: global.primary_font
+          family: global.natural_font
           size: 12px
           style: italic
           fill: global.color.park_name
@@ -833,6 +891,7 @@ layers:
             {
               font:
                 {
+                  family: global.primary_font,
                   fill: global.color.landuse_name,
                   stroke: { color: global.color.default_halo },
                 },
@@ -847,6 +906,7 @@ layers:
         text:
           priority: global.priority.water
           font:
+            family: global.natural_font
             size: 11px
             fill: global.color.water_name
             stroke: { color: global.color.water_halo, width: 3 }
@@ -924,7 +984,7 @@ layers:
           transition: { show: { time: 0s }, hide: { time: 1s } }
           priority: global.priority.saddle
           font:
-            family: global.primary_font
+            family: global.natural_font
             size: 9.5px
             style: italic
             fill: global.color.default_label
@@ -972,7 +1032,7 @@ layers:
         transition: { show: { time: 0s }, hide: { time: 1s } }
         priority: global.priority.water
         font:
-          family: IBM Plex Serif
+          family: global.natural_font
           fill: global.color.water_name
           stroke: { color: global.color.water_halo, width: 2 }
           style: italic
@@ -1025,7 +1085,7 @@ layers:
         priority: global.priority.waterway
         #buffer: 3px
         font:
-          family: IBM Plex Serif
+          family: global.natural_font
           fill: global.color.water_name
           stroke: { color: global.color.water_halo, width: 2 }
           style: italic
@@ -2106,10 +2166,13 @@ layers:
             # turned out not to be permanent, just needing the same main-thread deferral
             # Phase 2 already established for priority.
             anchor_texture_shading: true
+            # Imhof: natural/physical features get serif, man-made get sans -- upright
+            # (not italic; italic is reserved for hydrography, see water_name/
+            # waterway_name) since only rivers/lakes get the slanted treatment here.
             font:
-              family: IBM Plex Sans Condensed
+              family: global.natural_font
               weight: 600
-              size: 12px
+              size: 11px
           text2:
             text_source: |
               function() {
@@ -2136,8 +2199,11 @@ layers:
                   const ele = global.metric_units ? feature.ele : feature.ele*3.2808399;
                   return ele.toFixed(0);
               }
+            # mono: reads as a plain data value, distinct from both the serif name above
+            # and the sans used for man-made labels -- not trying to be "natural" or
+            # "man-made" itself, just a number.
             font:
-              family: IBM Plex Sans Condensed
+              family: IBM Plex Mono
               weight: 400
               size: 9px
 
@@ -2156,7 +2222,10 @@ layers:
         draw: { text: { font: { size: 9.5px } } }
       draw:
         points: { visible: false }
-        text: { visible: true, priority: global.priority.saddle }
+        text:
+          visible: true
+          priority: global.priority.saddle
+          font: { family: global.natural_font }
 
     landuse:
       exclusive: true
@@ -2193,6 +2262,7 @@ layers:
           visible: false
           priority: global.priority.forest
           font:
+            family: global.natural_font
             fill: global.color.park_name
             stroke: { color: global.color.park_halo, width: 3 }
       commercial:
@@ -2208,6 +2278,7 @@ layers:
               {
                 font:
                   {
+                    family: global.primary_font,
                     fill: global.color.landuse_name,
                     stroke: { color: global.color.default_halo },
                   },
@@ -2222,7 +2293,7 @@ layers:
           text:
             priority: global.priority.water
             font:
-              family: IBM Plex Serif
+              family: global.natural_font
               size: 11px
               fill: global.color.water_name
               stroke: { color: global.color.water_halo, width: 3 }
@@ -2255,7 +2326,8 @@ layers:
           sprite: cave
           size: 20px
           priority: global.priority.cave
-          text: { font: { size: 11px, style: italic } }
+          text:
+            { font: { family: global.natural_font, size: 11px, style: italic } }
       mine:
         filter: { historic: mine }
         draw: { points: { sprite: abandoned_mine } }
@@ -2276,6 +2348,7 @@ layers:
           priority: global.priority.spring
           text:
             font:
+              family: global.natural_font
               size: 11px
               style: italic
               fill: global.color.spring
@@ -2299,6 +2372,7 @@ layers:
           priority: global.priority.spring
           text:
             font:
+              family: global.natural_font
               size: 11px
               style: italic
               fill: global.color.spring
@@ -2396,6 +2470,7 @@ layers:
             visible: true
             priority: global.priority.park
             font:
+              family: global.natural_font
               size: 9.5px
               fill: global.color.park_name
               stroke: { color: global.color.park_halo, width: 3 }
@@ -2781,7 +2856,9 @@ layers:
       islands:
         exclusive: true
         filter: { place: [island, islet, archipelago] }
-        draw: { text: { font: { style: italic } } }
+        # natural landform, not a settlement -- serif like other physical features,
+        # italic to match the water it sits in
+        draw: { text: { font: { family: global.natural_font, style: italic } } }
         archipelago:
           filter: { place: archipelago }
           draw: { text: { font: { transform: uppercase } } }
