@@ -1736,6 +1736,60 @@ temporary instrumentation reverted.
 how name and elevation sub-labels are placed relative to one another and relative to the
 peak icon (distance, stacking) is a separate, real, open item -- not attempted this round.
 
+## Phase 7 round 15 (2026-07-18): time-based anchor-refinement budget
+
+Picked up the v2 spec's last remaining item, "Revisit anchor-sampling cost," part 2 (the
+per-frame budget): `LabelManager::m_anchorRefineBudget` was a fixed LABEL COUNT
+(`kMaxAnchorRefinementsPerFrame = 150`, round 9) capping how many labels could run
+`Label::refineAnchor()`'s ~45-sample one-time cost per frame -- but the real cost is
+wall-clock time, and a fixed count behaves very differently between an `-O0` Debug build
+and an `-O2` Release build, needing two separately-tuned constants to feel right in both.
+
+**Fix**: replaced the count with a measured wall-clock budget. New
+`m_anchorRefineTimeUsedMs` (labelManager.h) accumulates actual time spent inside
+`refineAnchor()` calls this frame (via `std::chrono::steady_clock`, wrapping just the call
+itself, not the surrounding per-label bookkeeping); `kAnchorRefineBudgetMs = 4.0` (tunable)
+gates whether a new call may start. Reset once per frame in `updateLabels()`, exactly
+mirroring the old count's reset point. Once the budget is spent, remaining not-yet-refined
+labels keep their current anchor and retry next frame -- unchanged "retry every frame until
+success" behavior, `m_needUpdate` still set so the app keeps rendering until everyone gets
+a turn.
+
+**A real limitation worth recording, not a bug**: this checks the budget only *before*
+starting a new `refineAnchor()` call, not partway through one -- an individual call can't
+be interrupted mid-flight. Verified via temporary instrumentation at the Zermatt
+coordinates (cold cache, first visit to the area): a single frame recorded
+`anchorRefineTimeUsedMs=165.89` (41x the 4ms budget) while only 12 additional labels were
+refined that frame. This is expected, not a regression: the dominant per-call cost on a
+COLD mosaic (first time an area's elevation data is seen) is building the texture-shading
+pyramid from scratch (round 8's own cache point) -- a cost this budget change doesn't
+touch, since it wasn't its target (round 8 already made the REPEATED-sample cost cheap;
+this round targets the label-count/frame-count tradeoff, not per-sample cost). The budget
+still does its job -- it stops issuing *additional new* cold-cache builds once the frame is
+already over budget, capping the worst case to "whichever calls were already in flight plus
+one," rather than the unconstrained "every newly-eligible label in the frame" round 9
+was originally fixing.
+
+**Not attempted**: the OTHER half of the spec's suggestion -- a precomputed, downsampled
+"ridge-cost field" per mosaic (reusing round 8's cache point) that each anchor candidate
+would look up via a handful of grid reads instead of calling `sampleTextureShadingAtMosaic()`
+directly (5 samples x up to 9 anchors = up to 45 calls/label). Per the cold-cache profiling
+above, the dominant cost observed is the one-time pyramid *build* itself, which a ridge-cost
+field would not eliminate (it would need the same underlying pyramid data, just derive one
+more downsampled grid from it) -- its benefit would be narrower than originally assumed,
+reducing repeated-sample overhead on an *already-cached* mosaic, which round 8 already made
+cheap. Left for Sebastian's call on whether the added architecture (a new cached grid,
+`textureShading.cpp`, plus rewiring `anchorCandidateCost()`/`refineAnchor()` to read from it)
+is still worth pursuing given this.
+
+**Verified**: `make -f tests.mk` still 2037 assertions/186 cases, both `make DEBUG=1` and
+`make` (Release) build clean. All temporary instrumentation reverted.
+
+```
+./build/Release/ascend --view.lat 45.9763 --view.lng 7.6586 --view.zoom 13.0 --view.rotation 0 --view.tilt 0 --sources.last_source stylus-osm-terrain
+./build/Debug/ascend   --view.lat 45.9763 --view.lng 7.6586 --view.zoom 13.0 --view.rotation 0 --view.tilt 0 --sources.last_source stylus-osm-terrain
+```
+
 ## Verification approach
 
 - Each phase: project builds clean (`make`, Release), relevant unit tests pass
