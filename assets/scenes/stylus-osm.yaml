@@ -439,6 +439,49 @@ application:
       min: 0
       max: 3000
       step: 50
+    # Procedural rock texture (styles.rock-texture) - bare_rock land cover only
+    u_rock_scale:
+      style: rock-texture
+      label: Rock Texture Scale (m)
+      min: 0.5
+      max: 30
+      step: 0.5
+    u_rock_strength:
+      style: rock-texture
+      label: Rock Texture Strength
+      min: 0
+      max: 1
+      step: 0.05
+    u_rock_octaves:
+      style: rock-texture
+      label: Rock Texture Octaves
+      min: 1
+      max: 4
+      step: 1
+    u_rock_runnel:
+      style: rock-texture
+      label: Rock Erosion Runnels
+      min: 0
+      max: 1
+      step: 0.05
+    u_rock_curv_strength:
+      style: rock-texture
+      label: Rock Curvature Strength
+      min: 0
+      max: 1
+      step: 0.05
+    u_rock_curv_scale:
+      style: rock-texture
+      label: Rock Curvature Scale
+      min: 0
+      max: 200
+      step: 5
+    u_rock_min_zoom:
+      style: rock-texture
+      label: Rock Texture Min Zoom
+      min: 0
+      max: 16
+      step: 0.5
 
   # specify fields indexed for search and filter to select indexed features
   search_data:
@@ -620,6 +663,160 @@ styles:
     lighting: false
     terrain_grid: 256
 
+  # Procedural bare-rock relief texture (fast, purely synthetic - no elevation-scale
+  #  detail exists at this grain in the DEM). Only mixed into the `rock` (bare_rock)
+  #  landuse draw rule below, not the shared unlit-polygons style, so scree and every
+  #  other land-cover polygon (forest/grass/etc.) pays none of this cost.
+  rock-texture:
+    mix: unlit-polygons
+    # NOT inherited from unlit-polygons via `mix:` (unlike shaders: blocks/uniforms) -
+    #  omitting this left gridRes silently at 0 (no terrain-grid tessellation at all) for
+    #  this style specifically, for this style's entire lifetime, which was the actual
+    #  root cause of the Matterhorn summit drape investigation (docs/terrain-drape-
+    #  cellcaps-investigation.md Round 10): with gridRes=0, bare_rock's mesh was just the
+    #  raw, sparse earcut boundary vertices with no internal subdivision, so a huge
+    #  triangle could span the entire summit and linearly interpolate straight across it,
+    #  undershooting a sharp peak by up to ~1000m - regardless of how correct the
+    #  elevation function itself was (confirmed correct throughout that investigation).
+    #  256 matches unlit-polygons' own value and was hand-verified sufficient (real-DEM
+    #  bilinear undershoot at the Matterhorn's true summit is ~2m even at this density).
+    terrain_grid: 256
+    shaders:
+      defines:
+        # compile-time cap on the fbm octave loop; effective count is u_rock_octaves
+        ROCK_TEXTURE_MAX_OCTAVES: 4
+      uniforms:
+        # world-space size (meters) of the base noise cell - larger = bigger boulder-
+        #  scale blotches, smaller = finer grain. v_world_position.xy is Mercator-
+        #  projected meters (pan/zoom-stable - see "World coordinates for 3d procedural
+        #  textures" in polygon.vs), so the texture holds a consistent physical scale at
+        #  any zoom level by construction, no re-tiling/popping as tiles swap zoom.
+        u_rock_scale: 9.0
+        # overall shading contrast of the effect (multiplies color.rgb, see color block)
+        u_rock_strength: 0.35
+        u_rock_octaves: 3
+        # erosion-runnel anisotropy: elongates noise along the downhill direction
+        #  (real scree chutes/gully streaks run downhill), scaled by local slope
+        u_rock_runnel: 0.5
+        # how much the REAL DEM curvature (5-tap Laplacian) tints the synthetic noise -
+        #  aligns a few of the noise's "cracks"/"ridges" with actual gullies/spines
+        #  instead of looking entirely pasted-on
+        u_rock_curv_strength: 0.4
+        u_rock_curv_scale: 40.0
+        # view zoom below which the effect fades out entirely (bare-rock polygons are
+        #  tiny/irrelevant at these zooms anyway, and per-meter noise would alias)
+        u_rock_min_zoom: 9.0
+      blocks:
+        global: |
+          #ifdef TANGRAM_FRAGMENT_SHADER
+          // Fast value-noise hash + ridged fbm - the standard "ridged multifractal"
+          //  trick used for procedural rock/mountain surfaces: folding value noise
+          //  around its midpoint turns troughs into sharp cracks/crevices and peaks
+          //  into thin bright ridge lines, which reads as "rock" at any scale.
+          float rockHash(vec2 p) {
+              return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+          }
+          float rockNoise(vec2 p) {
+              vec2 i = floor(p), f = fract(p);
+              vec2 u = f * f * (3.0 - 2.0 * f);
+              // Wrap the integer cell coordinate to a small, fixed range before hashing.
+              //  p is derived from v_world_position.xy (real Mercator-projected meters,
+              //  hundreds of thousands to low millions in magnitude - see pBase in the color
+              //  block below), so i can be huge. rockHash's sin()-based hash loses precision
+              //  catastrophically at large arguments (GPU sin() only reliably range-reduces
+              //  over a bounded domain), making the hash hypersensitive to tiny input changes
+              //  at this scale - a sub-pixel pan can shift the true (unwrapped) coordinate by
+              //  a part-per-million yet flip the hash's output entirely, producing visible
+              //  flicker/corruption exactly where this noise renders (the rock-texture
+              //  polygon), and, downstream, corrupting the background-adaptive text halo's
+              //  luminance read of whatever's under a label near a rock-textured area (its
+              //  color block re-samples the actual composited framebuffer, so an unstable
+              //  rock-texture color feeds it unstable input). 1000 keeps any single
+              //  contiguous bare_rock feature (a few km across even at Matterhorn scale, well
+              //  under 1000 * u_rock_scale meters) safely within one period - no visible seam
+              //  - while keeping the hash's own input magnitude small and stable everywhere.
+              vec2 iw = mod(i, 1000.0);
+              float a = rockHash(iw);
+              float b = rockHash(iw + vec2(1.0, 0.0));
+              float c = rockHash(iw + vec2(0.0, 1.0));
+              float d = rockHash(iw + vec2(1.0, 1.0));
+              return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+          }
+          float rockRidged(vec2 p) { return 1.0 - abs(2.0 * rockNoise(p) - 1.0); }
+          float rockFbm(vec2 p, float octaves) {
+              float sum = 0.0, amp = 0.5, freq = 1.0, norm = 0.0;
+              for (int i = 0; i < ROCK_TEXTURE_MAX_OCTAVES; i++) {
+                  if (float(i) >= octaves) { break; }
+                  sum += amp * rockRidged(p * freq);
+                  norm += amp;
+                  freq *= 2.02;  // slightly off power-of-two so bands don't lattice-align
+                  amp *= 0.5;
+              }
+              return norm > 0.0 ? sum / norm : 0.0;
+          }
+          #endif
+        color: |
+          {
+              float rockFade = smoothstep(u_rock_min_zoom, u_rock_min_zoom + 2.0, u_map_position.z);
+              if (rockFade > 0.001) {
+                  // 5-tap slope/curvature stencil on the elevation raster already attached
+                  //  to this style for terrain draping (global.terrain_3d_mixin/get-
+                  //  elevation, pulled in via the unlit-polygons mixin) - cheaper than
+                  //  hillshade.yaml's own 9-tap/mosaic-seam-exact stencil, which also drives
+                  //  contour lines and needs that rigor; a texture accent doesn't.
+                  vec2 st = currentRasterUV(ELEVATION_INDEX);
+                  vec2 texwh = rasterPixelSize(ELEVATION_INDEX);
+                  #ifdef ELEVATION_MOSAIC
+                  texwh = texwh / 3.0 + float(ELEVATION_TILE_OVERLAP);
+                  #endif
+                  vec2 duv = 1.0 / texwh;
+                  float hc = getElevationAt(st);
+                  float hn = getElevationAt(st + vec2(0.0, duv.y));
+                  float hs = getElevationAt(st - vec2(0.0, duv.y));
+                  float he = getElevationAt(st + vec2(duv.x, 0.0));
+                  float hw = getElevationAt(st - vec2(duv.x, 0.0));
+                  vec2 dxy_elev = 2.0 * 3.141592 * 6378137.0 * exp2(-u_tile_origin.w) * duv / u_raster_offsets[ELEVATION_INDEX].z;
+                  float unproj = exp(u_map_position.y / 6378137.0);
+                  float coslat = 2.0 / (unproj + 1.0 / unproj);
+                  vec2 gradTrue = vec2(he - hw, hn - hs) / (2.0 * dxy_elev * coslat);
+                  float slopeMag = length(gradTrue);
+                  float slope01 = clamp(slopeMag / 1.5, 0.0, 1.0);  // ~56 deg -> fully "ragged"
+                  // discrete Laplacian: >0 convex (ridge/spire/ledge), <0 concave (gully/crack)
+                  float lap = (hn + hs + he + hw - 4.0 * hc) / (dxy_elev.x * dxy_elev.x * coslat * coslat);
+                  float curv01 = clamp(lap * u_rock_curv_scale, -1.0, 1.0);
+
+                  // max(), not a ?: guard: a true summit apex is a critical point where the
+                  //  gradient is EXACTLY zero by construction (symmetric finite-difference
+                  //  taps around a local max), so slopeMag can legitimately be exactly 0.0
+                  //  there - a ?: guard only SELECTS the safe branch, it doesn't stop the
+                  //  compiler from evaluating gradTrue/slopeMag on both sides first (GLSL
+                  //  ?: often lowers to a branchless select for pure expressions like this),
+                  //  so the 0/0 = NaN can still leak into `downhill` and poison rockShade for
+                  //  that fragment (Matterhorn summit report: flat bare-rock color/hillshade,
+                  //  no texture at all right at the peak - everywhere else, where slope is
+                  //  never exactly 0, was unaffected). Same pattern as sunShadow()'s
+                  //  `s_world.xy / max(length(s_world.xy), 1e-4)` in hillshade.yaml.
+                  vec2 downhill = gradTrue / max(slopeMag, 1e-4);
+                  vec2 across = vec2(-downhill.y, downhill.x);
+                  vec2 pBase = v_world_position.xy / u_rock_scale;
+                  // erosion-runnel anisotropy: elongate features along the downhill
+                  //  direction, scaled by slope (flat scree gets no directional bias,
+                  //  steep cliff faces get pronounced streaking)
+                  float stretch = u_rock_runnel * slope01;
+                  vec2 pAniso = vec2(dot(pBase, downhill) * (1.0 - 0.7 * stretch), dot(pBase, across));
+
+                  float grain = rockFbm(pAniso, u_rock_octaves);
+                  // fine, slope-independent pebble/grain speckle so flat scree isn't
+                  //  perfectly flat
+                  float speckle = rockNoise(pBase * 3.7) - 0.5;
+
+                  float rockSignal = (grain - 0.5) * mix(0.4, 1.0, slope01) + 0.15 * speckle
+                                    + u_rock_curv_strength * curv01;
+                  float rockShade = 1.0 + u_rock_strength * rockFade * clamp(rockSignal, -1.0, 1.0);
+                  color.rgb *= clamp(rockShade, 0.4, 1.6);
+              }
+          }
+
   ocean-polygons:
     base: polygons
     lighting: false
@@ -701,7 +898,7 @@ layers:
       draw: { polygons: { visible: true, color: global.color.ice } }
     rock:
       filter: [{ natural: [bare_rock] }]
-      draw: { polygons: { visible: true, color: global.color.rock } }
+      draw: { polygons: { visible: true, color: global.color.rock, style: rock-texture } }
     scree:
       filter: [{ natural: [scree] }]
       draw: { polygons: { visible: true, color: global.color.scree } }
