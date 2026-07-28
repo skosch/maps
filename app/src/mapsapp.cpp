@@ -800,7 +800,6 @@ void MapsApp::loadSceneFile(bool async, bool setPosition)
   options.diskCacheDir = baseDir + "cache/";
   options.diskTileCacheMaxAge = cfg()["storage"]["max_age"].as<int64_t>(options.diskTileCacheMaxAge);
   options.preserveMarkers = true;
-  options.debugStyles = Tangram::getDebugFlag(Tangram::DebugFlags::tile_bounds);
   options.metricUnits = metricUnits;
   // fallback fonts
   FSPath basePath(baseDir);
@@ -1768,8 +1767,17 @@ void MapsApp::createGUI(SDL_Window* sdlWin)
       Button* debugCb = createCheckBoxMenuItem(debugFlags[ii]);
       debugCb->onClicked = [=](){
         debugCb->setChecked(!debugCb->isChecked());
-        setDebugFlag(Tangram::DebugFlags(ii), debugCb->isChecked());
+        Tangram::DebugFlags flag = Tangram::DebugFlags(ii);
+        setDebugFlag(flag, debugCb->isChecked());
         //loadSceneFile();  -- most debug flags shouldn't require scene reload
+        if (flag == Tangram::DebugFlags::tile_bounds && map && map->getScene()) {
+          // DebugStyle/DebugTextStyle read this flag live in their build() (see debugStyle.cpp,
+          // debugTextStyle.cpp), but built tile meshes are cached per style - already-loaded
+          // tiles won't pick up the flip until their meshes are rebuilt. clearTileSets() drops
+          // the built-tile/mesh cache only (clearSourceCaches defaults to false), so tiles are
+          // rebuilt from already-fetched source data with no network refetch or scene reload.
+          map->getScene()->tileManager()->clearTileSets();
+        }
       };
       debugMenu->addItem(debugCb);
     }
@@ -2638,18 +2646,38 @@ bool MapsApp::drawFrame(int fbWidth, int fbHeight)
 
   // map rendering moved out of layoutAndDraw since object selection (which can trigger UI changes) occurs during render!
   bool mapdirty = platform->notifyRender();
-  if(mapdirty) {
+  // Also force an update whenever the camera itself has been mutated (e.g. handlePanGesture,
+  //  called directly and synchronously from touch/mouse-drag input, independent of
+  //  notifyRender()'s own dirty tracking) since the last update(), even if THIS tick's only
+  //  dirty source is the GUI (cursor blink, hover, menu interaction). Otherwise render() below
+  //  redraws the scene/terrain using the camera's live position while labels - whose screen
+  //  positions are only recomputed inside mapUpdate() - stay at a stale position for however
+  //  many GUI-only renders happen before the next real update.
+  if(mapdirty || map->isViewDirty()) {
     auto now = std::chrono::high_resolution_clock::now();
     double currTime = std::chrono::duration<double>(now.time_since_epoch()).count();
     mapUpdate(currTime);
     //mapsWidget->redraw();  -- so we can draw unchanged UI over map
     scaleBar->redraw();  //if(!scaleBarPainter) {  }
+    mapdirty = true;
   }
 
   FrameInfo::begin("UI update");
   painter->deviceRect = Rect::wh(fbWidth, fbHeight);
   Rect dirty = gui->layoutAndDraw(painter.get());
   FrameInfo::end("UI update");
+
+  // A GUI-only redraw (e.g. menu hover) can leave mapdirty false here while still being
+  //  dirty.isValid(), which would otherwise fall through to map->render() below without a
+  //  paired mapUpdate() this frame - the same render/update desync isViewDirty() above
+  //  guards against for camera mutations, just from a different trigger. Running update() here
+  //  too keeps render() and update() always paired 1:1, eliminating the gap structurally.
+  if(!mapdirty && dirty.isValid()) {
+    auto now = std::chrono::high_resolution_clock::now();
+    double currTime = std::chrono::duration<double>(now.time_since_epoch()).count();
+    mapUpdate(currTime);
+    mapdirty = true;
+  }
 
   if(!mapdirty && !dirty.isValid())
     return false;
