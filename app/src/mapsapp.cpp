@@ -1761,21 +1761,26 @@ void MapsApp::createGUI(SDL_Window* sdlWin)
 #endif
   {
     Menu* debugMenu = createMenu(Menu::HORZ);
-    const char* debugFlags[9] = {"Freeze tiles", "Proxy colors", "Tile bounds", "Label bounds",
-        "Tangram info", "Draw all labels", "Tangram stats", "Selection buffer", "Depth buffer"};
-    for(int ii = 0; ii < 9; ++ii) {
+    const char* debugFlags[10] = {"Freeze tiles", "Proxy colors", "Tile bounds", "Label bounds",
+        "Tangram info", "Draw all labels", "Tangram stats", "Selection buffer", "Depth buffer",
+        "Zoom labels"};
+    for(int ii = 0; ii < 10; ++ii) {
       Button* debugCb = createCheckBoxMenuItem(debugFlags[ii]);
       debugCb->onClicked = [=](){
         debugCb->setChecked(!debugCb->isChecked());
         Tangram::DebugFlags flag = Tangram::DebugFlags(ii);
         setDebugFlag(flag, debugCb->isChecked());
         //loadSceneFile();  -- most debug flags shouldn't require scene reload
-        if (flag == Tangram::DebugFlags::tile_bounds && map && map->getScene()) {
+        if ((flag == Tangram::DebugFlags::tile_bounds || flag == Tangram::DebugFlags::proxy_colors
+             || flag == Tangram::DebugFlags::zoom_labels)
+            && map && map->getScene()) {
           // DebugStyle/DebugTextStyle read this flag live in their build() (see debugStyle.cpp,
-          // debugTextStyle.cpp), but built tile meshes are cached per style - already-loaded
-          // tiles won't pick up the flip until their meshes are rebuilt. clearTileSets() drops
-          // the built-tile/mesh cache only (clearSourceCaches defaults to false), so tiles are
-          // rebuilt from already-fetched source data with no network refetch or scene reload.
+          // debugTextStyle.cpp), and RasterStyleBuilder/PolygonStyleBuilder/PolylineStyleBuilder
+          // read it live too (rasterStyle.cpp/polygonStyle.cpp/polylineStyle.cpp) - but built tile
+          // meshes are cached per style - already-loaded tiles won't pick up the flip until their
+          // meshes are rebuilt. clearTileSets() drops the built-tile/mesh cache only
+          // (clearSourceCaches defaults to false), so tiles are rebuilt from already-fetched
+          // source data with no network refetch or scene reload.
           map->getScene()->tileManager()->clearTileSets();
         }
       };

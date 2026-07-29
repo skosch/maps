@@ -34,9 +34,11 @@ sources:
         max_zoom: 16
         cache: elevation
         # How eagerly hillshading/texture-shading drops to a coarser cached zoom while zooming
-        #  out (see TileSource::lodAreaBias's doc comment) - 1.0 is the previous default
-        #  behavior; live-adjustable via the resolution-retention GUI slider (MapsApp).
-        zoom_retention: 1.0
+        #  out (see TileSource::lodAreaBias's doc comment) - 1.0 was the original default; raised
+        #  to 4.0 (2026-07-29) since the grazing-tilt LOD investigation found the area threshold
+        #  needs a much bigger retention margin to keep steep terrain detailed under tilt.
+        #  Live-adjustable via the resolution-retention GUI slider (MapsApp).
+        zoom_retention: 4.0
         # 2 years
         max_age: 63072000
         attribution: |
