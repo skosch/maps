@@ -1043,8 +1043,11 @@ layers:
   # Phase 5 (docs/label-placement-plan.md): national-park / protected-area / forest labels,
   # drawn from the actual `landuse` polygon geometry so TextStyleBuilder can curve the
   # label along an elongated shape's principal axis. This replaces the pre-baked centroid
-  # point that `pois > landuse` used to draw (now disabled there, see the comment at that
-  # rule) -- filter conditions mirror it exactly for visual parity otherwise.
+  # point that `pois > landuse` used to draw for most of these types (now disabled there,
+  # see the comment at that rule) -- filter conditions mirror it exactly for visual parity
+  # otherwise. Exception: glacier, which stays on the old centroid-point path (see the
+  # glacier rule under pois > landuse) because the tile schema doesn't put a name on the
+  # glacier polygon, only on the centroid point.
   landuse_name:
     data: { source: osm, layer: landuse }
     exclusive: true
@@ -1059,7 +1062,6 @@ layers:
             protect_class: ["1", "1a", "1b", "2", "3", "5"],
             $zoom: { min: 10 },
           }
-        - { natural: [glacier], $zoom: { min: 10 } }
         - { landuse: [commercial, retail, winter_sports], $zoom: { min: 12 } }
         - {
             landuse: [industrial, military],
@@ -1099,16 +1101,10 @@ layers:
     national_park:
       filter: { boundary: national_park }
       draw: { text: { priority: global.priority.national_park } }
-    glacier:
-      filter: { natural: glacier }
-      draw:
-        text:
-          priority: global.priority.water
-          font:
-            family: global.natural_font
-            size: 11px
-            fill: global.color.water_name
-            stroke: { color: global.color.water_halo, width: 3 }
+    # glacier is deliberately absent here: process.lua never sets a name attribute on
+    # the glacier *polygon* written to the landuse layer (only on the pois>landuse
+    # centroid point), so this filter can never match a glacier feature -- see the
+    # glacier rule under pois > landuse, which is the real (non-superseded) label source.
     # don't show label for huge area (where boundries may be offscreen) beyond z12
     hide:
       filter:
@@ -2488,8 +2484,14 @@ layers:
         draw: { text: { priority: global.priority.national_park } }
       glacier:
         filter: { natural: glacier }
+        # Unlike national_park/protect_class/commercial etc., the OSM tile schema
+        # (scripts/tilemaker/process.lua) never puts a name attribute on the glacier
+        # *polygon* written to the landuse layer -- only on this pre-baked centroid
+        # point. So glacier can't use the landuse_name polygon-curving path below (it
+        # would just never match); this stays as the real (non-superseded) label source.
         draw:
           text:
+            visible: true
             priority: global.priority.water
             font:
               family: global.natural_font
