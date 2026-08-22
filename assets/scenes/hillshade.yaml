@@ -26,6 +26,16 @@ import:
 
 global:
     contour_color: '#C56008'  #vec4(0.773,0.376,0.031,1.)
+    # Per-cover contour colors for the vector styles that now draw their own contour
+    #  lines (terrain-ground below; stylus-osm.yaml's unlit-polygons/rock-texture): the
+    #  blend-over hillshade pass paints opaquely over those covers, so it cannot know
+    #  their identity - the coloring moved INTO the styles via terrainContourCoverage()
+    #  (elevation.yaml). contour_default covers bare earth/scree/grass/etc.; the old
+    #  contour_color above remains for this pass's raster-basemap branch (satellite),
+    #  where nothing beneath owns contours.
+    contour_default: '#7E6E60'
+    contour_forest: '#49663F'
+    contour_ice: '#AFC4D4'
     base_mix_color: [0.9, 0.9, 0.9, 0.8]
     show_contours: false
     show_hypsometric: true
@@ -372,6 +382,24 @@ styles:
         mix: [ global.terrain_3d_mixin, get-elevation ]
         raster: custom
         lighting: false
+        shaders:
+            defines:
+                SHOW_CONTOURS: global.show_contours
+            uniforms:
+                u_contour_default: global.contour_default
+            blocks:
+                color: |
+                    #ifdef SHOW_CONTOURS
+                    // Default-colored contours on bare earth. This style is the baseline
+                    //  under every land-cover polygon (which repaints the same pixels with
+                    //  its own cover color - terrainContourCoverage() is identical math in
+                    //  both, so the selections coincide exactly), and in 2D this quad IS
+                    //  the whole base map - without it, contours would only exist where a
+                    //  cover polygon happens to be.
+                    // (METRIC_UNITS / u_min_contour_elev are inherited from get-elevation,
+                    //  which owns them for every style on this mixin chain.)
+                    color.rgb = mix(color.rgb, u_contour_default.rgb, terrainContourCoverage());
+                    #endif
 
     hillshade:
         base: raster
@@ -811,7 +839,21 @@ styles:
                           base_color = mix(base_color, vec4(relief.rgb, 0.75), 1.0/(1.0 + base_color.a));
                     #endif
                     } else {
+                    #ifndef HILLSHADE_BLEND_OVER
                         // contour lines
+                        //
+                        // NOT drawn by this pass anymore when blending over the vector base
+                        // map: the composite at the bottom of this block
+                        // (color = mix(color, base_color, base_color.a)) paints contours at
+                        // FULL opacity over the land-cover polygons below, so one fixed
+                        // color was forced onto every cover - and no color picked here can
+                        // know what cover it lands on. The Wanderkarte look (pale blue on
+                        // glaciers, dark green in forest...) instead draws the lines inside
+                        // the styles that ARE a cover, via terrainContourCoverage()
+                        // (elevation.yaml) with per-cover colors; this pass's translucent
+                        // veil keeps shading them coherently. The raster-basemap branch
+                        // (satellite imagery) still draws them here - nothing beneath owns
+                        // contours there.
                         // spacing between contour lines in meters - 10m has too many artifacts
                     #ifdef METRIC_UNITS
                         float interval = z >= 14. ? 25. : z >= 12. ? 50. : 100.;
@@ -844,6 +886,7 @@ styles:
                         ddn = abs(1. - fract(hc/coarse))*coarse * px_per_elev;
                         cov += max(0.5 - dup + coarsehw, 0.) + max(0.5 - ddn + coarsehw, 0.);
                         base_color = mix(base_color, contour_color, min(cov, 1.));
+                    #endif  // HILLSHADE_BLEND_OVER (empty else in blend-over: see comment above)
                     }
                     #endif
                     // Texture-shading occlusion proxy (docs/texture-shading-plan.md): computed here,

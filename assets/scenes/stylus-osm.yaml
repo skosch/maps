@@ -437,6 +437,9 @@ application:
     show_ski_runs: { label: Ski }
     show_transit: { label: Transit }
     show_parking: { label: Parking }
+    # contour lines + labels (global.show_contours, hillshade.yaml); colors are
+    #  per-land-cover - see unlit-polygons/rock-texture/terrain-ground styles
+    show_contours: { label: Contours }
     #show_motorways: { label: Motorways }
     # docs/label-placement-plan.md Task 3: candidate-pool-size floor for peaks below z12
     # that lack a real OSM prominence/wikipedia tag -- NOT a salience/prominence signal,
@@ -692,6 +695,50 @@ styles:
     mix: global.terrain_3d_mixin
     lighting: false
     terrain_grid: 256
+    # Land-cover-colored contour lines (Wanderkarte style, Sebastian: light blue on
+    #  glaciers, grayish brown on mountain rock, darker green in forest). The lines are
+    #  drawn HERE, inside the cover styles, rather than by hillshade's blend-over pass:
+    #  that pass composites its contour pixels at FULL opacity over whatever is below,
+    #  so it can only ever force ONE color onto every cover - only the style that IS a
+    #  cover knows its identity. Shared math: terrainContourCoverage() (elevation.yaml,
+    #  mixed in via terrain_3d_mixin) - identical uniforms and identical stencil in
+    #  every participant (terrain-ground, rock-texture, here) make the lines align
+    #  across cover boundaries by construction.
+    shaders:
+      defines:
+        SHOW_CONTOURS: global.show_contours
+      uniforms:
+        # (METRIC_UNITS / u_min_contour_elev inherited from get-elevation on this
+        #  mixin chain - see elevation.yaml)
+        u_contour_default: global.contour_default
+        u_contour_forest: global.contour_forest
+        u_contour_ice: global.contour_ice
+        # fill-color anchors: EXACTLY the colors the landuse rules set (same globals),
+        # so comparing the fragment's own v_color against them identifies the cover
+        # with zero engine support. Vertex colors are 8-bit-quantized (<= ~0.004
+        # distance), real palette separations are >= ~0.05, hence the 0.02 epsilon.
+        # Anything unmatched (grass, scree, farmland, piste, airport...) inherits the
+        # default - new covers need no edits here.
+        u_forest_fill: global.color.forest
+        u_ice_fill: global.color.ice
+        u_water_fill: global.color.water
+      blocks:
+        color: |
+          #ifdef SHOW_CONTOURS
+          {
+              float contourCov = terrainContourCoverage();
+              // inland water carries no contours (lakes ride this same style; ocean is
+              //  already excluded by the underwater guard inside the coverage function)
+              if (distance(color.rgb, u_water_fill.rgb) < 0.02) { contourCov = 0.0; }
+              vec3 contourColor = u_contour_default.rgb;
+              if (distance(color.rgb, u_forest_fill.rgb) < 0.02) {
+                  contourColor = u_contour_forest.rgb;
+              } else if (distance(color.rgb, u_ice_fill.rgb) < 0.02) {
+                  contourColor = u_contour_ice.rgb;
+              }
+              color.rgb = mix(color.rgb, contourColor, contourCov);
+          }
+          #endif
 
   # Procedural bare-rock relief texture (fast, purely synthetic - no elevation-scale
   #  detail exists at this grain in the DEM). Only mixed into the `rock` (bare_rock)
@@ -712,7 +759,15 @@ styles:
     #  bilinear undershoot at the Matterhorn's true summit is ~2m even at this density).
     terrain_grid: 256
     shaders:
+      defines:
+        SHOW_CONTOURS: global.show_contours
       uniforms:
+        # land-cover-colored contour lines (Wanderkarte style): bare rock wears the
+        #  default grayish brown - the SAME global unlit-polygons' non-cover fragments
+        #  use, so lines stay continuous across rock/scree/earth boundaries (drawn by
+        #  the shared terrainContourCoverage(), elevation.yaml; METRIC_UNITS and
+        #  u_min_contour_elev are inherited from get-elevation on this mixin chain)
+        u_contour_default: global.contour_default
         # ROUND 13 (docs/rock-texture-v2-plan.md): the marble-photo triplanar sampling of
         #  rounds 6-12 is replaced by a procedural FILTERED ridged multifractal (Sebastian:
         #  "fractal surface... extremely fast and realistic", ref iq's Rain Forest fBm
@@ -1063,6 +1118,14 @@ styles:
                   float microLight = clamp(1.0 + (nDotLBump - nDotLMacro), 0.5, 2.0);
                   color.rgb *= mix(1.0, microLight, rockFade);
               }
+              #ifdef SHOW_CONTOURS
+              // Land-cover-colored contours (Wanderkarte style): bare rock carries the
+              //  default grayish brown. Drawn LAST, outside the rockFade gate above
+              //  (contours have their own zoom ladder from z10) and after the material +
+              //  micro-lighting so the "ink" is never washed by either - contour lines
+              //  are printed cartography on top of the shaded surface, not part of it.
+              color.rgb = mix(color.rgb, u_contour_default.rgb, terrainContourCoverage());
+              #endif
           }
 
   ocean-polygons:

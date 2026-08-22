@@ -63,6 +63,19 @@ styles:
                 ELEVATION_MOSAIC: global.elevation_mosaic
                 ELEVATION_TILE_OVERLAP: global.elevation_tile_overlap
                 ELEVATION_TILE_PIXELS: global.elevation_tile_pixels
+                # terrainContourCoverage() (end of the global block below) reads these.
+                #  Declaring them HERE - not in the styles that call the function -
+                #  matters: the global block merges into EVERY style on the
+                #  terrain_3d_mixin chain (unlit-lines, heightglow, markers...), and an
+                #  uncalled function referencing an undeclared identifier still fails
+                #  shader compilation. Mixins inherit defines/uniforms, so this is the
+                #  single point of truth. (hillshade.yaml re-declares METRIC_UNITS
+                #  identically - benign.)
+                METRIC_UNITS: global.metric_units
+            uniforms:
+                # sea-level floor for the underwater-contour guard; hillshade exposes a
+                # GUI slider for its own copy, the vector styles share this default
+                u_min_contour_elev: 0.0
             blocks:
                 global: |
                     #if defined(TANGRAM_FRAGMENT_SHADER) || defined(TANGRAM_VERTEX_RASTERS)
@@ -252,4 +265,108 @@ styles:
                         vec2 az_dir = cos(s_az) * e + sin(s_az) * h;
                         return vec3(az_dir * cos(s_elev), sin(s_elev));
                     }
+                    // Land-cover-colored contour lines: precise-elevation stencil + line
+                    //  coverage in one function, shared by every style that draws its own
+                    //  contours (hillshade.yaml's terrain-ground, stylus-osm.yaml's
+                    //  unlit-polygons / rock-texture). Moved out of hillshade.yaml's color
+                    //  block because there the lines composite at FULL opacity over the
+                    //  land-cover polygons below it - one fixed color forced onto every
+                    //  cover - while the Wanderkarte look wants per-cover colors (pale blue
+                    //  on glaciers, dark green in forest...), which only the style that IS
+                    //  the cover can choose. Drawing in each style also aligns the lines
+                    //  across cover boundaries BY CONSTRUCTION: identical math over
+                    //  identical uniforms selects identical pixels in every participant.
+                    //  That is why the plain bilinear getElevationAt() is not used here -
+                    //  line placement needs the 3x3-tap quadratic fit, ported verbatim
+                    //  from hillshade.yaml's normal block (including the non-mosaic
+                    //  tile-edge extrapolation). Returns line pixel-coverage [0,1];
+                    //  callers mix their own contour color by it. Uniform-coherent gates
+                    //  (zoom, SHOW_CONTOURS compile-out at the call sites) keep it free
+                    //  when contours are off.
+                    #ifdef TANGRAM_FRAGMENT_SHADER
+                    float terrainContourCoverage() {
+                        // same zoom floor as hillshade's own ladder (below it, hypsometric
+                        //  tints rule; drawing 100m lines at country scale is pure noise)
+                        if (u_map_position.z < 10.) { return 0.; }
+                        vec2 st = currentRasterUV(ELEVATION_INDEX);
+                        vec2 texwh = rasterPixelSize(ELEVATION_INDEX);
+                        #ifdef ELEVATION_MOSAIC
+                        texwh = texwh / 3.0 + float(ELEVATION_TILE_OVERLAP);
+                        #endif
+                        vec2 duv = 1./texwh;
+                        vec2 ij = st * texwh;
+                        vec2 cen_ij = floor(ij) + 0.5;
+                        vec2 uv = cen_ij*duv;
+                        float h00 = getElevationAt(uv - duv);
+                        float h01 = getElevationAt(uv + vec2(-duv.x, 0.));
+                        float h02 = getElevationAt(uv + vec2(-duv.x, duv.y));
+                        float h10 = getElevationAt(uv + vec2(0., -duv.y));
+                        float h11 = getElevationAt(uv);
+                        float h12 = getElevationAt(uv + vec2(0., duv.y));
+                        float h20 = getElevationAt(uv + vec2(duv.x, -duv.y));
+                        float h21 = getElevationAt(uv + vec2(duv.x, 0.));
+                        float h22 = getElevationAt(uv + duv);
+                        #ifndef ELEVATION_MOSAIC
+                        // handle edge of tile by extrapolating (with a mosaic, real neighbor-tile data
+                        //  exists beyond the tile edge, so the out-of-range samples above are valid)
+                        bvec2 bot = lessThan(cen_ij, vec2(1.));
+                        bvec2 top = greaterThan(cen_ij + 1., texwh);
+                        if(bot.x) { h00 = 2.*h10 - h20; h01 = 2.*h11 - h21; h02 = 2.*h12 - h22; }
+                        if(top.x) { h20 = 2.*h10 - h00; h21 = 2.*h11 - h01; h22 = 2.*h12 - h02; }
+                        if(bot.y) { h00 = 2.*h01 - h02; h10 = 2.*h11 - h12; h20 = 2.*h21 - h22; }
+                        if(top.y) { h02 = 2.*h01 - h00; h12 = 2.*h11 - h10; h22 = 2.*h21 - h20; }
+                        #endif
+                        // proj meters per elevation tile pixel; note u_tile_origin.w is tile data zoom,
+                        //  u_tile_origin.z is tile styling zoom, u_map_position.z is view zoom (float)
+                        vec2 dxy_elev = 2.*3.141592*6378137.0*exp2(-u_tile_origin.w)*duv/u_raster_offsets[ELEVATION_INDEX].z;
+                        // convert projected meters to actual meters - Mercator scale factor is cos(latitude); we recover
+                        //  latitude from Mercator y (projected meters): lat = 2*atan(exp(y/R)) - M_PI/2;
+                        float unproj = exp(u_map_position.y/6378137.0);
+                        float coslat = 2.0/(unproj + 1.0/unproj);
+                        // offset from pixel center
+                        vec2 f = ij - cen_ij;
+                        // 2nd order finite diff - mixed partials smooth the interpolated surface
+                        float ddxy = (h22 - h20 - h02 + h00)/4.;
+                        mat2 curv = mat2(h21 - 2.*h11 + h01, ddxy, ddxy, h12 - 2.*h11 + h10);
+                        vec2 grad0 = vec2(h21 - h01, h12 - h10)/2.0;
+                        float slope = length((grad0 + curv*f)/dxy_elev);
+                        // sub-texel elevation from the quadratic surface through the stencil
+                        float elev = h11 + dot(f, grad0) + 0.5*dot(f, curv*f);
+                        float z = u_map_position.z;
+                        // spacing between contour lines in meters - 10m has too many artifacts
+                        #ifdef METRIC_UNITS
+                        float interval = z >= 14. ? 25. : z >= 12. ? 50. : 100.;
+                        float coarse = z >= 14. ? 100. : z >= 12. ? 200. : 500.;
+                        #else
+                        float interval = (z >= 14. ? 100. : z >= 12. ? 200. : 500.)/3.28084;
+                        float coarse = (z >= 14. ? 500. : z >= 12. ? 1000. : 2000.)/3.28084;
+                        #endif
+                        // contour line half width in pixels
+                        float linehw = 0.35;
+                        #ifdef TANGRAM_TERRAIN_3D
+                        // the VISIBLE surface is the rendered mesh (v_world_position.z), which
+                        //  the DEM evaluation above approximates; hug the mesh where the two
+                        //  disagree meaningfully vs. the interval, and take the screen-space
+                        //  elevation scale straight from the mesh z (exact per-pixel)
+                        linehw *= 1.25;
+                        elev = mix(elev, v_world_position.z, clamp(5.0*abs(elev - v_world_position.z)/interval, 0., 1.));
+                        float px_per_elev = 1./fwidth(v_world_position.z);
+                        #else
+                        float px_per_elev = 1./(slope * u_meters_per_pixel);
+                        #endif
+                        // no underwater contour lines!
+                        float hc = max(elev, u_min_contour_elev + interval/2.);
+                        // distance in pixels to nearest contour lines (above and below)
+                        float dup = fract(hc/interval)*interval * px_per_elev;
+                        float ddn = abs(1. - fract(hc/interval))*interval * px_per_elev;
+                        // contour line pixel coverage
+                        float cov = max(0.5 - dup + linehw, 0.) + max(0.5 - ddn + linehw, 0.);
+                        // coarse lines
+                        float coarsehw = 2.*linehw;
+                        dup = fract(hc/coarse)*coarse * px_per_elev;
+                        ddn = abs(1. - fract(hc/coarse))*coarse * px_per_elev;
+                        cov += max(0.5 - dup + coarsehw, 0.) + max(0.5 - ddn + coarsehw, 0.);
+                        return min(cov, 1.);
+                    }
+                    #endif
                     #endif
