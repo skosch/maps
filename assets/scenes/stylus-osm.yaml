@@ -446,10 +446,10 @@ application:
       min: 0
       max: 3000
       step: 50
-    # Procedural rock texture (styles.rock-texture) - bare_rock land cover only
+    # Procedural rock surface (styles.rock-texture) - bare_rock land cover only
     u_rock_scale:
       style: rock-texture
-      label: Rock Texture Scale (m)
+      label: Rock Feature Scale (m)
       min: 5
       max: 1000
       step: 10
@@ -495,12 +495,6 @@ application:
       min: 1
       max: 3
       step: 0.1
-    u_rock_zoom_compensation:
-      style: rock-texture
-      label: Rock Scale Zoom Compensation
-      min: 0
-      max: 1
-      step: 0.05
 
   # specify fields indexed for search and filter to select indexed features
   search_data:
@@ -634,35 +628,22 @@ cameras:
 #    light1: { type: directional, origin: world, direction: [1, 1, -1], diffuse: 0.5, ambient: 0.7 }
 #    #light2: { type: directional, origin: world, direction: [1, 1, -1], diffuse: [.3, .3, .3, 1.], ambient: [0.7, 0.7, 0.7, 1.] }
 
-textures:
-  # rock-texture-v2 round 6 (docs/rock-texture-v2-plan.md): real scanned rock photo
-  #  (Poly Haven "Marble Cliff 05", CC0), replacing procedural crack/ridge generation.
-  #  filtering: mipmap is required, not optional - this is what actually solves the
-  #  aliasing/moire problems every procedural round fought (real hardware mip chain,
-  #  automatic, free), unlike the manual fwidth()-based fades those rounds needed.
-  #  wrap: repeat likewise required (round 8) - added support for this to SceneLoader
-  #  (previously no way to request it at all - see parseTexWrap, sceneLoader.cpp/.h):
-  #  the shader used to manually fract() the UV to tile instead, which broke the GPU's
-  #  automatic mip-level derivative computation at every tile seam (fract() is a hard
-  #  discontinuity, so dFdx/dFdy spike right at the wrap) - looked like noisy pixelation
-  #  rather than a clean repeating texture, worst exactly where seams are most frequent
-  #  (small tiles across a big view). Native wrapping only wraps the integer part during
-  #  the texel fetch itself, so derivatives on the continuous coordinate stay correct.
-  #  nor_gl = OpenGL normal-map convention (matches this desktop-GL app). The .exr
-  #  originals (normal, roughness) aren't loadable by this engine at all - no OpenEXR
-  #  decoder anywhere in tangram-es, only stb_image/wuffs (JPEG/PNG/GIF/TGA/PSD) plus
-  #  TIFF/LERC for the elevation-raster path specifically - so both were converted to
-  #  PNG (verified byte-exact linear passthrough against the source EXR's raw values,
-  #  not just visually eyeballed - a naive conversion easily bakes in an sRGB gamma
-  #  curve, which would silently corrupt a normal map's encoded vector directions).
-  rock_albedo:
-    url: ../textures/marble_cliff_05_diff_2k.jpg
-    filtering: mipmap
-    wrap: repeat
-  rock_normal:
-    url: ../textures/marble_cliff_05_nor_gl_2k.png
-    filtering: mipmap
-    wrap: repeat
+# rock-texture-v2 rounds 6-12 sampled real scanned photo textures here (Poly Haven
+#  "Marble Cliff 05", CC0 - files still on disk in assets/textures/, untracked). Round 13
+#  ("fractal surface", docs/rock-texture-v2-plan.md) replaced sampling with procedural
+#  filtered ridged-fBm; this block is retired but kept in comment form for A/B revival.
+#  If re-enabling: filtering: mipmap and wrap: repeat are BOTH required (rounds 6/8 -
+#  see git history of this block for the full rationale), and wrap:repeat support was
+#  added to SceneLoader (parseTexWrap) for this effort specifically.
+#textures:
+#  rock_albedo:
+#    url: ../textures/marble_cliff_05_diff_2k.jpg
+#    filtering: mipmap
+#    wrap: repeat
+#  rock_normal:
+#    url: ../textures/marble_cliff_05_nor_gl_2k.png
+#    filtering: mipmap
+#    wrap: repeat
 
 styles:
   # blend_order -1000 to draw buildings just above other geometry; blend_order -110 to -100 reserved by app
@@ -732,26 +713,21 @@ styles:
     terrain_grid: 256
     shaders:
       uniforms:
-        # ROUND 6 (docs/rock-texture-v2-plan.md): real scanned texture (textures.rock_
-        #  albedo/rock_normal, top of this file) replaces ALL procedural crack/ridge/
-        #  facet generation from rounds 1-5 - five rounds of hash/Voronoi/multifractal
-        #  math kept fighting the same two problems (aliasing/moire, and GPU cost) that
-        #  a real, actually-mipmapped photo texture solves structurally: hardware mip
-        #  chains kill aliasing for free (no more manual fwidth() fades), and a couple
-        #  texture fetches are cheaper than dozens of hash/trig calls. u_rock_scale is
-        #  back to a plain WORLD-METERS-per-texture-tile value (not the DEM-texel-
-        #  adaptive scheme from round 3 - that was specifically about matching
-        #  procedural facet size to DEM resolution, moot now that there's no procedural
-        #  facet grid to mismatch). ROUND 7 (Sebastian: "super zoomed in", "need it
-        #  bigger"): default raised well past round 6's 15. ROUND 10 (Sebastian: "still
-        #  way too small... should be like covering half of the Matterhorn" - explicit
-        #  hundreds-of-meters scale, 50 was still an order of magnitude too small) -
-        #  live-tunable via the "Rock Texture Scale (m)" GUI slider, faster to dial in by
-        #  eye than another edit/redeploy round.
+        # ROUND 13 (docs/rock-texture-v2-plan.md): the marble-photo triplanar sampling of
+        #  rounds 6-12 is replaced by a procedural FILTERED ridged multifractal (Sebastian:
+        #  "fractal surface... extremely fast and realistic", ref iq's Rain Forest fBm
+        #  techniques). The two failure modes of the rounds-1-5 procedural attempts are
+        #  addressed structurally this time, not patched: ALIASING by per-octave
+        #  screen-space amplitude fading (the analytic equivalent of mip selection - see
+        #  rockRidgedFbm), and SLOWNESS by analytic derivatives (one noise evaluation
+        #  yields both albedo and the bump normal - no finite differences, no cell
+        #  searches). u_rock_scale is the MACRO FEATURE WAVELENGTH in world meters
+        #  (octaves span scale..scale/20); 400m calibrated by Sebastian's "half the
+        #  Matterhorn" round-10 framing. Live-tunable via GUI slider.
         u_rock_scale: 400.0
-        # overall CONTRAST of the material blend (mix weight toward the real texture +
-        #  weathering/lichen blend, see color block) - 0 = flat original palette color,
-        #  1 = full effect (real texture). Independent of u_rock_normal_strength (the
+        # overall CONTRAST of the material blend (mix weight toward the procedural
+        #  material + weathering/lichen blend, see color block) - 0 = flat original
+        #  palette color, 1 = full effect. Independent of u_rock_normal_strength (the
         #  bump-lighting contrast).
         u_rock_strength: 0.35
         # how much the REAL DEM curvature (5-tap Laplacian) weighs into the material
@@ -767,38 +743,35 @@ styles:
         # how strongly lichen/moss patches (low-slope, concave, damp microsites) tint in -
         #  0 disables entirely, useful for arid/desert contexts where lichen reads wrong
         u_rock_lichen_strength: 0.25
-        # bump-mapping strength: how much the REAL normal-map texture perturbs the
-        #  DEM-gradient macro surface normal before the (screen-anchored, hillshade-
+        # bump-mapping strength: how much the fractal's own analytic gradient perturbs
+        #  the DEM-gradient macro surface normal before the (screen-anchored, hillshade-
         #  consistent) sun dot-product is taken - see color block. 0 = no perturbation,
         #  an honest no-op (the light term is computed as a DELTA from the unperturbed
         #  normal specifically so it never re-shades the macro slope hillshade's own
-        #  blend-over already covers). ROUND 12: pulled back from round 7's 1.8 - the
-        #  microLight clamp is now structurally safe at any strength (see color block),
-        #  so there's no need to keep the default conservative for safety; 1.0 is just a
-        #  more reasonable starting point to dial up from live.
+        #  blend-over already covers). The microLight clamp (round 12) is structurally
+        #  safe at any strength, so this is purely an aesthetic dial.
         u_rock_normal_strength: 1.0
-        u_rock_albedo_tex: rock_albedo
-        u_rock_normal_tex: rock_normal
-        # ROUND 11: contrast boost applied to the final material color (texture +
+        # ROUND 11: contrast boost applied to the final material color (fractal +
         #  weathering + lichen combined) before it's blended into color.rgb - see the
         #  color block for why (hillshade's translucent 3D shadow overlay attenuates
         #  whatever's underneath, this pre-compensates so real texture detail survives
         #  visible). 1 = no boost (honest no-op: mix(gray, color, 1.0) == color).
         u_rock_contrast: 1.7
-        # 0 = pure physical world-meters scale (shrinks naturally at low zoom, like any
-        #  real object would); 1 = fully screen-constant apparent tile size regardless of
-        #  zoom. See the color block's scaleZoomFactor comment.
-        u_rock_zoom_compensation: 0.5
       blocks:
         global: |
           #ifdef TANGRAM_FRAGMENT_SHADER
-          // ROUND 6 (docs/rock-texture-v2-plan.md): all procedural crack/ridge/facet
-          //  generation from rounds 1-5 is gone, replaced by the real texture declared
-          //  at the top of this file (u_rock_albedo_tex/u_rock_normal_tex) - see the
-          //  color block. Kept: this one cheap hash/noise pair, used only for the
-          //  lichen-patchiness mask now - it never had the aliasing/moire problems the
-          //  removed generators did (non-periodic pseudo-random interpolation, not a
-          //  repeating wave or a branchy cell search).
+          // ROUND 13 (docs/rock-texture-v2-plan.md): procedural FILTERED ridged
+          //  multifractal replaces the rounds-6-12 marble-photo sampling (Sebastian:
+          //  "fractal surface... extremely fast and realistic"; ref iq's Rain Forest /
+          //  "Painting with math" fBm techniques). The two structural additions over the
+          //  failed rounds 1-5 procedural attempts: analytic derivatives (one evaluation
+          //  yields value AND gradient - albedo and bump normal from a single pass, no
+          //  finite-difference resampling) and per-octave screen-space amplitude fading
+          //  (the analytic equivalent of mip selection, which is what kills the
+          //  aliasing/moire every earlier procedural round died of). rockHash/rockNoise
+          //  below are kept unchanged from those rounds - they only feed the lichen mask,
+          //  and never had the aliasing problems (smooth interpolated hash noise, not a
+          //  periodic wave or cell search).
           float rockHash(vec2 p) {
               return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
           }
@@ -823,6 +796,83 @@ styles:
               float c = rockHash(iw + vec2(0.0, 1.0));
               float d = rockHash(iw + vec2(1.0, 1.0));
               return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+          }
+          // Value noise WITH ANALYTIC DERIVATIVES (iq's noised()): returns
+          //  (value, d/dp.x, d/dp.y), derivatives in cell units. Same sin-hash precision
+          //  wrap as rockNoise above; side effect accepted there too: the field repeats
+          //  every 997 cells per octave (>= ~19km apart for this shader's finest octave)
+          //  - a rare, faint seam line, far rarer than the aliasing it prevents.
+          vec3 rockNoised(vec2 p) {
+              vec2 i = floor(p), f = fract(p);
+              vec2 u = f * f * (3.0 - 2.0 * f);
+              vec2 du = 6.0 * f * (1.0 - f);   // derivative of the smoothstep blend
+              vec2 iw = mod(i, 997.0);
+              float a = rockHash(iw);
+              float b = rockHash(iw + vec2(1.0, 0.0));
+              float c = rockHash(iw + vec2(0.0, 1.0));
+              float d = rockHash(iw + vec2(1.0, 1.0));
+              float k1 = b - a, k2 = c - a, k3 = a - b - c + d;
+              return vec3(a + k1 * u.x + k2 * u.y + k3 * u.x * u.y,
+                          du * (vec2(k1, k2) + k3 * u.yx));
+          }
+          // Ridged multifractal (Musgrave, "Texturing & Modeling: A Procedural
+          //  Approach") with derivative propagation, per-octave screen-space fading, and
+          //  per-octave domain rotation. The defining step vs plain ridged-fBm: each
+          //  octave is weighted by the PREVIOUS octave's already-ridged value, producing
+          //  sharp weighted crest lines with quiet self-similar nested valleys - actual
+          //  "mountain silhouette" structure rather than uniform bumpiness (the round-5
+          //  finding; this is its proper form, evaluated ONCE with derivatives instead
+          //  of being abandoned for textures because of aliasing it no longer has).
+          //  p: domain coords in base-octave cells (caller folds world meters -> cells,
+          //  plus any anisotropy); pxPerBaseCell: screen pixels spanned by one base cell
+          //  along the domain's most-compressed axis (caller folds perspective footprint
+          //  AND anisotropy compression together - conservative fading is correct).
+          //  Returns (normalized ridge sum ~[0,1], gradient wrt p .xy). Caller maps the
+          //  gradient back through its own domain transform (see color block).
+          vec3 rockRidgedFbm(vec2 p, float pxPerBaseCell) {
+              const float LAC = 2.13;   // non-integer: octave lattices never re-align
+              // rotate+shrink the domain between octaves - breaks up the axis-aligned
+              // bias value-noise gradients otherwise show (iq's standard fbm practice).
+              // Precomputed transpose: GLSL ES 1.0 has no transpose().
+              const mat2 M2  = mat2(0.8, 0.6, -0.6, 0.8);
+              const mat2 M2T = mat2(0.8, -0.6, 0.6, 0.8);
+              const int OCTAVES = 5;
+              const float GAIN = 0.55;
+              const float WEIGHT_GAIN = 2.2;
+              float sum = 0.0, norm = 0.0, amp = 0.5, weight = 1.0;
+              float pxPerCell = pxPerBaseCell;
+              mat2 T = mat2(1.0);   // accumulated transposed domain map: dn/dp0 = T * gn
+              vec2 gradP0 = vec2(0.0);
+              for (int i = 0; i < OCTAVES; i++) {
+                  vec3 nd = rockNoised(p);
+                  // ridge fold into [0,1]; chain rule through |.| via sign()
+                  float n = 1.0 - abs(2.0 * nd.x - 1.0);
+                  vec2 g = -2.0 * sign(2.0 * nd.x - 1.0) * nd.yz;
+                  // Musgrave cascade (weight from THIS octave feeds the NEXT one)
+                  n *= weight;
+                  g *= weight;
+                  weight = clamp(n * WEIGHT_GAIN, 0.0, 1.0);
+                  // Per-octave screen-space fade: THE fix for rounds 1-5's aliasing.
+                  //  An octave whose wavelength approaches ~1-4 screen pixels fades to
+                  //  zero contribution instead of shimmering/moiring under minification
+                  //  - exactly what a hardware mip chain does for sampled textures.
+                  //  norm accumulates the same weights, so the result stays normalized
+                  //  (stable brightness AND stable relief strength) as octaves drop out
+                  //  while zooming - no popping at the fade boundaries either.
+                  float fade = smoothstep(1.0, 4.0, pxPerCell);
+                  sum += amp * fade * n;
+                  gradP0 += amp * fade * (T * g);
+                  norm += amp * fade;
+                  amp *= GAIN;
+                  pxPerCell /= LAC;
+                  T = T * M2T * LAC;
+                  p = M2 * p * LAC;
+              }
+              // guard the all-octaves-faded degenerate (impossible in practice: the
+              //  coarsest octave's wavelength >> any real pixel footprint)
+              if (norm > 0.0001) { sum /= norm; gradP0 /= norm; }
+              else { sum = 0.5; }
+              return vec3(sum, gradP0);
           }
           #endif
         color: |
@@ -855,124 +905,75 @@ styles:
                   float lap = (hn + hs + he + hw - 4.0 * hc) / (dxy_elev.x * dxy_elev.x * coslat * coslat);
                   float curv01 = clamp(lap * u_rock_curv_scale, -1.0, 1.0);
 
-                  // ROUND 7 (Sebastian: plain top-down UV stretches badly on near-
-                  //  vertical terrain - "washi paper over a potato mountain" - the
-                  //  textbook triplanar-mapping problem). macroNormal moved up here
-                  //  (was computed later, in the lighting section below) since it's now
-                  //  also needed as the triplanar blend weight.
-                  // ROUND 11: gradient magnitude clamped (direction preserved) before
-                  //  building macroNormal specifically - residual tearing persisted after
-                  //  round 10 on the MOST extreme near-vertical faces even with the
-                  //  softened blend. Finite-difference DEM gradients get numerically
-                  //  unstable as terrain approaches vertical (a raster elevation grid
-                  //  can't represent an overhang, just a rapid step, and the gradient
-                  //  across that step is highly sensitive to tiny horizontal sampling
-                  //  offsets) - so macroNormal, and therefore which triplanar projection
-                  //  dominates, could swing wildly between neighboring fragments on
-                  //  exactly the steepest terrain. 8.0 ~= tan(83deg) - bounds macroNormal
-                  //  to a very steep but finite/stable slope without touching normal
-                  //  terrain's behavior at all. gradTrue itself (slope01/curv01, already
-                  //  computed above) is untouched - this only stabilizes the triplanar
-                  //  normal specifically.
+                  // macroNormal: DEM-gradient surface normal. ROUND 11 (kept): gradient
+                  //  magnitude clamped, direction preserved - finite-difference DEM
+                  //  gradients are numerically unstable as terrain approaches vertical
+                  //  (a raster can't represent an overhang, just a rapid step), so the
+                  //  normal is bounded to a steep-but-finite slope (8.0 ~= tan(83deg)).
+                  //  gradTrue itself (slope01/curv01) is untouched.
                   vec2 gradStable = gradTrue * min(1.0, 8.0 / max(slopeMag, 1e-5));
                   vec3 macroNormal = normalize(vec3(-gradStable, 1.0));
-                  // Blend weight per projection axis: how much the surface faces that
-                  //  axis. ROUND 10 (Sebastian: "tearing"/"weirdly pixelated" persisted
-                  //  even after the round-9 smooth-blend fix): the real culprit was this
-                  //  power-4 sharpening. The Matterhorn's actual DEM normal is genuinely
-                  //  jagged at small scale (it's famous for its four sharp ridges/faces),
-                  //  and since the XY/XZ/YZ projections sample essentially UNCORRELATED
-                  //  parts of the same photo (independent UV math per axis), a steep
-                  //  power-4 weight - which snaps the blend to near-binary the moment one
-                  //  axis edges ahead of the others - turned ordinary jagged terrain into
-                  //  chaotic high-contrast switching between unrelated texture samples, the
-                  //  "torn paper" look. Power 1 (no extra sharpening beyond the normal's
-                  //  own components) blends far more gradually across real terrain detail.
-                  vec3 triW = abs(macroNormal);
-                  triW /= (triW.x + triW.y + triW.z + 1e-5);
 
-                  // Three orthogonal projections of the same tile - top-down (XY, correct
-                  //  on flat/gentle ground), and two vertical ones (XZ/YZ, correct on
-                  //  steep faces the top-down projection would otherwise smear across).
-                  //  ROUND 8: NOT fract()-wrapped anymore - textures.rock_albedo/
-                  //  rock_normal now declare wrap: repeat (added SceneLoader support for
-                  //  this, previously missing entirely) and native hardware wrapping only
-                  //  wraps the integer part during the texel fetch, leaving the
-                  //  screen-space derivative of this continuous coordinate intact for
-                  //  correct automatic mip-level selection. A manual fract() is a hard
-                  //  discontinuity (1.0 -> 0.0) that spikes dFdx/dFdy right at every tile
-                  //  seam, corrupting the GPU's automatic LOD choice there - with small
-                  //  tiles across a big view (many seams on screen at once) this reads as
-                  //  noisy pixelation rather than a clean repeating texture, which is
-                  //  exactly what round 7 shipped and Sebastian saw.
-                  //  ROUND 11 (Sebastian: "to also enjoy the texture when zoomed out...
-                  //  zoom out less slowly than the camera?" - not crazy at all, this is
-                  //  standard cartographic practice: line widths/label sizes/etc already
-                  //  scale with zoom rather than staying strictly physical throughout this
-                  //  app). A fixed real-world tile size necessarily shrinks to
-                  //  imperceptibility at low zoom, same as any real object would - correct
-                  //  optics, but not what reads as an attractive map texture. Scale up
-                  //  u_rock_scale as view zoom drops below a reference point so the
-                  //  apparent (screen-space) tile size stays more consistent across the
-                  //  zoom range. u_rock_zoom_compensation: 0 = pure physical scale
-                  //  (shrinks naturally with distance, today's round-10 behavior), 1 =
-                  //  fully screen-constant apparent size (exp2 matches how Web Mercator
-                  //  meters-per-pixel itself doubles per zoom level, so this exactly
-                  //  cancels the distance shrink) - partial values are a blend, avoiding
-                  //  the "texture visibly swims/rescales while zooming" feel a full 1.0
-                  //  can have.
-                  float scaleZoomFactor = exp2(max(0.0, 14.0 - u_map_position.z) * u_rock_zoom_compensation);
-                  float effectiveRockScale = u_rock_scale * scaleZoomFactor;
-                  vec2 uvXY = v_world_position.xy / effectiveRockScale;
-                  vec2 uvXZ = v_world_position.xz / effectiveRockScale;
-                  vec2 uvYZ = v_world_position.yz / effectiveRockScale;
+                  // --- ROUND 13: filtered derivative ridged multifractal --------------
+                  // Screen footprint (world meters per pixel) from fwidth on TILE-LOCAL
+                  //  coordinates: v_world_position.xy is ~5e6 m here, where one fp32 ulp
+                  //  is ~0.5 m - coarser than real per-pixel footprints at close zoom, so
+                  //  differencing world coords directly would quantize this to mush. The
+                  //  constant per-tile offset cancels mathematically (fwidth of x-c ==
+                  //  fwidth of x), but subtracting BEFORE differencing keeps the
+                  //  differentiated magnitudes small (tile extents <= ~48km, ulp ~4mm)
+                  //  so the subtraction itself stays exact.
+                  vec2 fwLocal = fwidth(v_world_position.xy - u_tile_origin.xy);
+                  float mpp = max(fwLocal.x, fwLocal.y);
+                  // Downhill anisotropy: stretch the pattern along the REAL fall line
+                  //  (gullies/runnels follow actual drainage - the round-1 insight, now
+                  //  on a field that can carry it). Gated by slope: downhill is
+                  //  meaningless and numerically noisy on flat ground. Elongation runs
+                  //  1 -> 2 as slope goes ~5deg -> ~31deg. Known risk, accepted for
+                  //  round 13 and trivially disabled (ROCK_ANISO = 0): the fall-line
+                  //  direction flips across ridgelines, creasing the field there - at
+                  //  this elongation that reads as spine structure, not a seam.
+                  const float ROCK_ANISO = 1.0;
+                  float E = 1.0 + ROCK_ANISO * smoothstep(0.08, 0.6, slopeMag);
+                  vec2 fallDir = -gradStable / max(length(gradStable), 1e-4);
+                  // World->domain stretch, outer-product form (no trig): scales by 1/E
+                  //  along fallDir, leaves the perpendicular untouched. Symmetric by
+                  //  construction - the gradient chain back to world below relies on
+                  //  transpose(A) == A (GLSL ES 1.0 has no transpose()).
+                  mat2 A = mat2(1.0) + (1.0 / E - 1.0) * outerProduct(fallDir, fallDir);
+                  vec2 pDom = A * v_world_position.xy / u_rock_scale;
+                  // Pixels per base-octave cell along the compressed axis: anisotropy
+                  //  folds into the screen footprint conservatively (the compressed
+                  //  axis is the one that aliases first).
+                  vec3 rfbm = rockRidgedFbm(pDom, u_rock_scale / (mpp * E));
+                  float crest = rfbm.x;
+                  // Gradient wrt world meters: chain back through the domain map
+                  //  (d/dwp = transpose(A)/scale * d/dp; A symmetric). This is the bump
+                  //  normal's entire source - the SAME single evaluation that colored
+                  //  the pixel, which is the whole speed argument for analytic
+                  //  derivatives over finite-difference resampling (round 4's Voronoi
+                  //  bump needed 3 full cell searches for this).
+                  vec2 gradWorld = (A * rfbm.yz) / u_rock_scale;
 
-                  // Albedo: a plain 3-way blend is always correct regardless of axis
-                  //  orientation (it's just a color average), so full smooth triplanar
-                  //  blending is cheap and safe here.
-                  vec3 texAlbedo = texture2D(u_rock_albedo_tex, uvXY).rgb * triW.z
-                                  + texture2D(u_rock_albedo_tex, uvXZ).rgb * triW.y
-                                  + texture2D(u_rock_albedo_tex, uvYZ).rgb * triW.x;
-
-                  // Normal: ROUND 9 (Sebastian: "weirdly pixelated" - the round 7/8 hard
-                  //  if/else switch to a single dominant projection was the actual cause.
-                  //  Real terrain normals flip which axis "dominates" constantly across
-                  //  ordinary rolling/rocky terrain, not just at extreme cliff edges, so a
-                  //  hard per-fragment switch produced jagged, blocky lighting
-                  //  discontinuities every time a neighbor fragment's dominant axis
-                  //  differed - exactly the reported artifact). Now a smooth 3-way blend
-                  //  using the SAME triW weights as albedo, at zero extra texture-fetch
-                  //  cost (the 3 samples were already being fetched for the hard-switch
-                  //  version too - this only changes how they're combined). Each sample is
-                  //  still reoriented into world space first (u/v/outward map to different
-                  //  world axes per projection - see the per-branch comments below), then
-                  //  blended; the result isn't unit length but that's fine, it's
-                  //  normalize()'d downstream anyway. nor_gl (OpenGL convention) unpacked
-                  //  to [-1,1] before reorienting.
-                  vec3 nXY = texture2D(u_rock_normal_tex, uvXY).rgb * 2.0 - 1.0;
-                  // wall facing north/south: texture U -> world X, V -> world Z (up),
-                  //  outward -> world Y, signed by which way the wall actually faces.
-                  vec3 nXZraw = texture2D(u_rock_normal_tex, uvXZ).rgb * 2.0 - 1.0;
-                  vec3 nXZ = vec3(nXZraw.x, sign(macroNormal.y) * nXZraw.z, nXZraw.y);
-                  // wall facing east/west: texture U -> world Y, V -> world Z (up),
-                  //  outward -> world X, signed by which way the wall actually faces.
-                  vec3 nYZraw = texture2D(u_rock_normal_tex, uvYZ).rgb * 2.0 - 1.0;
-                  vec3 nYZ = vec3(sign(macroNormal.x) * nYZraw.z, nYZraw.x, nYZraw.y);
-                  vec3 texNormal = nXY * triW.z + nXZ * triW.y + nYZ * triW.x;
-
-                  // --- material/color blend: real color variation from the actual photo,
-                  //  darkened toward u_rock_shadow_color in concave (gully/crack)
-                  //  microsites via the real DEM curvature - deliberately independent of
-                  //  the lighting below (real rock gullies are BOTH geometrically
+                  // --- material/color blend -------------------------------------------
+                  // Weathering keyed to the REAL DEM curvature (concave gully/crack
+                  //  microsites are damper/darker) - deliberately independent of the
+                  //  fractal field below (real rock gullies are BOTH geometrically
                   //  self-shadowed (lighting) AND materially different (damper/darker -
                   //  albedo), not the same signal twice).
                   float weathered = clamp(u_rock_curv_strength * clamp(-curv01, 0.0, 1.0), 0.0, 1.0);
-                  vec3 materialColor = mix(texAlbedo, u_rock_shadow_color.rgb, weathered);
+                  vec3 materialColor = mix(color.rgb, u_rock_shadow_color.rgb, weathered);
+                  // Fractal structure in the albedo: crest lines read fresher/lighter,
+                  // hollows darker. Same field the lighting below uses, so color and
+                  // shading always agree about where the forms are - no albedo/lighting
+                  // mismatch to read as "pasted-on".
+                  materialColor *= 0.82 + 0.36 * crest;
 
                   // lichen/moss crust: common on exposed alpine rock worldwide regardless
-                  //  of geology - a strong "this is real rock" cue no photo texture alone
-                  //  supplies (it's tied to THIS mountain's actual shape, not the quarry
-                  //  the photo was taken at). Restricted to low-slope + concave (damp)
+                  //  of geology - a strong "this is real rock" cue no flat palette color
+                  //  or synthetic pattern supplies (it's tied to THIS mountain's actual
+                  //  shape and dampness, not to a generic noise field). Restricted to
+                  //  low-slope + concave (damp)
                   //  microsites, patchy via a cheap noise tap. u_rock_lichen_strength: 0
                   //  disables for arid contexts. ROUND 9: scale decoupled from
                   //  u_rock_scale (was implicitly 4x whatever the rock texture scale was
@@ -1006,22 +1007,22 @@ styles:
                   materialColor = mix(vec3(dot(materialColor, vec3(0.3333))), materialColor, u_rock_contrast);
 
                   // u_rock_strength keeps its original semantics: 0 = flat original
-                  //  palette color, 1 = full effect - now meaning the real texture instead
-                  //  of a flat color, so this slider is literally "how photographic".
+                  //  palette color, 1 = full effect (procedural material + weathering +
+                  //  lichen).
                   color.rgb = mix(color.rgb, materialColor, u_rock_strength * rockFade);
 
-                  // --- bump-perturbed lighting: a REAL surface normal, perturbed by a
-                  //  REAL normal-map texture, dotted against a real light direction - not
-                  //  a fake albedo trick, and no longer a procedural approximation of one
-                  //  either. macroNormal computed earlier above (also used as the
-                  //  triplanar blend weight). Plain vector addition instead of round 6's
-                  //  axis-specific "whiteout blend" - texNormal is already reoriented into
-                  //  world XYZ per the triplanar case above, and a uniform combine that
-                  //  works the same way regardless of which of the 3 cases fired is
-                  //  simpler than deriving a separate whiteout formula for each; texNormal
-                  //  is a small perturbation (not a huge tilt) so the approximation is fine.
-                  vec3 fullPerturbed = normalize(macroNormal + texNormal);
-                  // mix (not a direct blend of texNormal scaled by strength) so
+                  // --- bump-perturbed lighting ----------------------------------------
+                  // A REAL surface normal perturbed by the fractal's own ANALYTIC
+                  // gradient - zero extra noise evaluations - dotted against the shared
+                  // screen-anchored sun. Relief scale: treat the fractal as a pseudo-
+                  // heightfield ROCK_RELIEF*u_rock_scale meters tall; coupling relief to
+                  // feature size keeps the look coherent across the scale slider.
+                  // Plain additive tilt on macroNormal (small-perturbation approximation,
+                  // same combine the rounds-6-12 normal map used).
+                  const float ROCK_RELIEF = 0.12;
+                  vec3 detailN = vec3(-gradWorld * (u_rock_scale * ROCK_RELIEF), 0.0);
+                  vec3 fullPerturbed = normalize(macroNormal + detailN);
+                  // mix (not a direct scale of the detail tilt by strength) so
                   //  u_rock_normal_strength = 0 is an EXACT no-op (perturbedNormal ==
                   //  macroNormal bit-for-bit), same invariant as every round before this.
                   vec3 perturbedNormal = normalize(mix(macroNormal, fullPerturbed, u_rock_normal_strength));
