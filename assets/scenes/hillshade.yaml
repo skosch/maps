@@ -768,16 +768,11 @@ styles:
                     //  screen-right; 135 deg is the upper-left diagonal, chosen to be bit-identical to
                     //  the old normalize(-1,1,1) direction at zenith (parity, verified below).
                     //
-                    // camera-right in world coords = row 0 of the view rotation (u_view is world->camera;
-                    //  its rows are the camera basis vectors in world space). Under pure yaw+pitch (the map
-                    //  never rolls) camera-right stays horizontal, so its xy IS the yaw - pitch cannot leak in.
-                    vec3 cam_right = vec3(u_view[0][0], u_view[1][0], u_view[2][0]);
-                    vec2 e = cam_right.xy / max(length(cam_right.xy), 1e-4);  // map-plane screen-right
-                    vec2 h = vec2(-e.y, e.x);                                 // map-plane screen-up (90 deg CCW)
-                    float s_az = radians(u_sun_azimuth);
-                    float s_elev = radians(u_sun_elev);
-                    vec2 az_dir = cos(s_az) * e + sin(s_az) * h;              // sun azimuth in the map plane
-                    vec3 s_world = vec3(az_dir * cos(s_elev), sin(s_elev));
+                    // Formula lives in elevation.yaml's get-elevation style (screenAnchoredSunDir) -
+                    //  shared with stylus-osm.yaml's rock-texture micro-normal shading so the two
+                    //  never disagree under map rotation. See that function's comment for the
+                    //  camera-right/yaw-only-anchoring rationale (unchanged from here).
+                    vec3 s_world = screenAnchoredSunDir(u_sun_azimuth, u_sun_elev);
                     // Zenith parity (exact by construction): at north-up zenith, cam_right = world
                     //  east = (1,0,0), so e=(1,0), h=(0,1). With s_az=135 deg, az_dir=(cos135,sin135)=
                     //  (-0.70711,0.70711). With s_elev=35.264 deg (asin(1/sqrt(3))), cos(s_elev)=

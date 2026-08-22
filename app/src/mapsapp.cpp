@@ -13,6 +13,8 @@
 #include "data/rasterSource.h"
 #include "debug/frameInfo.h"
 #include "debug/profiler.h"
+#include "gl/hardware.h"
+#include "stb_image_write.h"  // for image export
 
 #include "touchhandler.h"
 #include "bookmarks.h"
@@ -1741,6 +1743,8 @@ void MapsApp::createGUI(SDL_Window* sdlWin)
   };
   overflowMenu->addItem(themeCb);
 
+  overflowMenu->addItem("Export Image...", [=](){ showExportImageDialog(); });
+
   undeleteMenu = createMenu(Menu::HORZ);
   overflowMenu->addSubmenu("Undelete", undeleteMenu);
   undeleteMenu->parent()->setVisible(false);  // hidden when empty
@@ -2602,6 +2606,184 @@ MapsApp::~MapsApp()
     nvgswuDeleteBlitter(nvglBlit);
 }
 
+// Export Image: render a single view (possibly much larger than the window) directly into an
+//  offscreen framebuffer at full target resolution, so the label collision solver lays out the
+//  whole image in one consistent pass - unlike stitching several screen-sized screenshots, which
+//  each get their own independent (and thus inconsistent) label layout.
+
+// exports always cover exactly the area currently visible on screen (same center, rotation, tilt) -
+//  the only thing the user picks is the zoom level, i.e. how much detail to render; output pixel
+//  size is derived from that automatically so the on-screen framing is reproduced exactly, just at
+//  higher (or lower) resolution, rather than exposing width/height as separately-editable numbers
+//  that could drift from the actual viewport shape.
+void MapsApp::showExportImageDialog()
+{
+  static SpinBox* zoomSpin = NULL;
+  static TextBox* sizeText = NULL;
+  static std::unique_ptr<Dialog> dialog;
+  // base view captured each time the dialog is opened; zoomSpin's value is expressed relative to it
+  static double baseLng = 0, baseLat = 0;
+  static float baseZoom = 0;
+  static int baseViewW = 0, baseViewH = 0;
+
+  auto computeSize = [](float zoom){
+    float scale = std::exp2(zoom - baseZoom);
+    int w = std::max(1, std::min(int(std::lround(baseViewW * scale)), Tangram::Hardware::maxTextureSize));
+    int h = std::max(1, std::min(int(std::lround(baseViewH * scale)), Tangram::Hardware::maxTextureSize));
+    return std::make_pair(w, h);
+  };
+
+  if(!dialog) {
+    zoomSpin = createSpinBox(0, 0.1, 0, 24, "%.2f");
+    sizeText = createTextBox("");
+
+    zoomSpin->onValueChanged = [=](real zoom){
+      auto sz = computeSize(float(zoom));
+      sizeText->setText(fstring("Output size: %d x %d px", sz.first, sz.second).c_str());
+    };
+
+    auto exportFn = [=](){
+      float zoom = float(zoomSpin->value());
+      auto sz = computeSize(zoom);
+      saveFileDialog({{"PNG image", "png"}}, "map-export", [=](const char* path){
+        startImageExport(baseLng, baseLat, zoom, sz.first, sz.second, path);
+      });
+    };
+
+    dialog.reset(createInputDialog({createTitledRow("Zoom", zoomSpin), sizeText},
+        "Export Image", "Export", exportFn));
+  }
+
+  CameraPosition cam = map->getCameraPosition();
+  baseLng = cam.longitude;
+  baseLat = cam.latitude;
+  baseZoom = cam.zoom;
+  baseViewW = map->getViewportWidth();
+  baseViewH = map->getViewportHeight();
+
+  zoomSpin->setValue(cam.zoom);  // setValue() doesn't fire onValueChanged, so update sizeText directly too
+  auto sz = computeSize(cam.zoom);
+  sizeText->setText(fstring("Output size: %d x %d px", sz.first, sz.second).c_str());
+
+  showModalCentered(dialog.get(), gui);
+}
+
+void MapsApp::startImageExport(double lng, double lat, float zoom, int width, int height, std::string path)
+{
+  if(imageExport.active) return;  // Export Image dialog is modal, so this shouldn't happen
+
+  width = std::max(1, std::min(width, Tangram::Hardware::maxTextureSize));
+  height = std::max(1, std::min(height, Tangram::Hardware::maxTextureSize));
+
+  imageExport.active = true;
+  imageExport.path = std::move(path);
+  imageExport.width = width;
+  imageExport.height = height;
+  imageExport.savedCam = map->getCameraPosition();
+  imageExport.savedViewW = map->getViewportWidth();
+  imageExport.savedViewH = map->getViewportHeight();
+  imageExport.startTime = 0;  // set on first stepImageExport() tick
+
+  // no padding for export - the padding normally reserved for the side panel would decenter the image
+  map->setPadding(Tangram::EdgePadding(0, 0, 0, 0, false));
+  map->setViewport(0, 0, width, height);
+  CameraPosition cam = imageExport.savedCam;  // preserve current rotation/tilt
+  cam.longitude = lng;
+  cam.latitude = lat;
+  cam.zoom = zoom;
+  map->setCameraPosition(cam);
+
+  // same MSAA setup as the on-screen mapsFB (mapsapp.cpp ~2650); resolveFB only needed if multisampled,
+  //  since glReadPixels can't read a multisample-renderbuffer-backed framebuffer directly
+  int samples = std::max(0, cfg()["tangram"]["msaa_samples"].as<int>(4));
+  int fbFlags = NVGLU_FB_DEPTH | (samples << NVGLU_SAMPLES_SHIFT);
+  imageExport.renderFB = nvgluCreateFramebuffer(NULL, width, height, NVGLU_NO_NVG_IMAGE | fbFlags);
+  imageExport.resolveFB = samples > 1 ?
+      nvgluCreateFramebuffer(NULL, width, height, NVGLU_NO_NVG_IMAGE | NVGLU_FB_DEPTH) : NULL;
+
+  platform->requestRender();
+}
+
+void MapsApp::stepImageExport()
+{
+  static constexpr double TIMEOUT_SECS = 60.0;
+
+  auto now = std::chrono::high_resolution_clock::now();
+  double currTime = std::chrono::duration<double>(now.time_since_epoch()).count();
+  if(imageExport.startTime == 0) {
+    imageExport.startTime = currTime;
+    imageExport.lastTickTime = currTime;
+  }
+
+  Tangram::MapState state = map->update(float(currTime - imageExport.lastTickTime));
+  imageExport.lastTickTime = currTime;
+
+  // reuse the same tile-count progress estimate as the normal progress indicator (see mapUpdate())
+  const auto* tileMgr = map->getScene()->tileManager();
+  double progress = 1 - tileMgr->numLoadingTiles()/double(std::max(1, tileMgr->numTotalTiles()));
+  if(progress >= 0 && progress < 1) {
+    progressWidget->setProgress(progress);
+    progressWidget->setVisible(true);
+  }
+
+  bool settled = !state.tilesLoading() && !state.sceneLoading() && !state.labelsChanging();
+  bool timedOut = (currTime - imageExport.startTime) > TIMEOUT_SECS;
+  if(!settled && !timedOut) {
+    platform->requestRender();  // keep ticking until tiles/labels settle (or we give up)
+    return;
+  }
+
+  int resolveRawFBO = 0;
+  if(imageExport.resolveFB) {
+    nvgluBindFramebuffer(imageExport.resolveFB);
+    resolveRawFBO = nvgluBindFramebuffer(imageExport.renderFB);  // return value = resolveFB's raw GL fbo id
+  }
+  else
+    nvgluBindFramebuffer(imageExport.renderFB);
+
+  map->render();
+
+  std::vector<unsigned char> pixels(size_t(imageExport.width) * size_t(imageExport.height) * 4);
+  if(imageExport.resolveFB) {
+    nvgluBlitFramebuffer(imageExport.renderFB, resolveRawFBO);  // resolves MSAA; binds resolveFB on return
+    nvgluReadPixels(imageExport.resolveFB, pixels.data());
+  }
+  else
+    nvgluReadPixels(imageExport.renderFB, pixels.data());
+
+  stbi_flip_vertically_on_write(1);
+  bool ok = stbi_write_png(imageExport.path.c_str(), imageExport.width, imageExport.height,
+      4, pixels.data(), imageExport.width*4) != 0;
+  stbi_flip_vertically_on_write(0);
+
+  finishImageExport(ok, ok && !settled && timedOut);
+}
+
+void MapsApp::finishImageExport(bool ok, bool timedOut)
+{
+  nvgluBindFBO(0);
+  if(imageExport.renderFB) { nvgluDeleteFramebuffer(imageExport.renderFB); imageExport.renderFB = NULL; }
+  if(imageExport.resolveFB) { nvgluDeleteFramebuffer(imageExport.resolveFB); imageExport.resolveFB = NULL; }
+
+  map->setViewport(0, 0, imageExport.savedViewW, imageExport.savedViewH);
+  map->setCameraPosition(imageExport.savedCam);
+  imageExport.active = false;
+
+  progressWidget->setVisible(false);
+  // invalidate MapsWidget's cached layout rect so the next GUI layout pass recomputes the real
+  //  window viewport + padding (see MapsWidget::onApplyLayout above) instead of us duplicating that
+  mapsWidget->viewport = Rect();
+  platform->requestRender();
+
+  if(!ok)
+    messageBox("Export Image", "Failed to write " + imageExport.path);
+  else if(timedOut)
+    messageBox("Export Image", "Image exported to " + imageExport.path +
+        "\n\nWarning: some tiles were still loading after 60s, so the image may be missing detail.");
+  else
+    messageBox("Export Image", "Image exported to " + imageExport.path);
+}
+
 bool MapsApp::drawFrame(int fbWidth, int fbHeight)
 {
   using Tangram::FrameInfo;
@@ -2611,6 +2793,11 @@ bool MapsApp::drawFrame(int fbWidth, int fbHeight)
     queuedFn();
 
   if(!runApplication || appSuspended) return false;
+
+  if(imageExport.active) {
+    stepImageExport();
+    return false;
+  }
 
   if(glNeedsInit) {
     glNeedsInit = false;

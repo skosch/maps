@@ -154,6 +154,8 @@ public:
   bool drawFrame(int fbWidth, int fbHeight);
   void setDpi(float dpi);
   Button* addUndeleteItem(const std::string& title, const SvgNode* icon, std::function<void()> callback);
+  void showExportImageDialog();
+  void startImageExport(double lng, double lat, float zoom, int width, int height, std::string path);
 
   Widget* currLayout = NULL;
   Splitter* panelSplitter = NULL;
@@ -271,4 +273,21 @@ private:
   NVGLUframebuffer* mapsFB = NULL;
   NVGLUframebuffer* nvglFB = NULL;
   NVGSWUblitter* nvglBlit = NULL;
+
+  // state for "Export Image" - renders the map into an offscreen framebuffer sized to the
+  //  requested output resolution (rather than stitching multiple screen-sized screenshots)
+  //  so the label collision solver lays out the whole image in a single consistent pass
+  struct ImageExportState {
+    bool active = false;
+    std::string path;
+    int width = 0, height = 0;
+    CameraPosition savedCam;
+    int savedViewW = 0, savedViewH = 0;
+    NVGLUframebuffer* renderFB = NULL;   // possibly multisampled - map renders into this
+    NVGLUframebuffer* resolveFB = NULL;  // non-multisampled resolve target read back to CPU; NULL if renderFB isn't multisampled
+    double lastTickTime = 0;
+    double startTime = 0;
+  } imageExport;
+  void stepImageExport();
+  void finishImageExport(bool ok, bool timedOut = false);
 };

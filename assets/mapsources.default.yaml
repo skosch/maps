@@ -52,6 +52,7 @@ stylus-bike-hike:
   updates:
     global.show_bike: true
     global.show_trails: true
+    global.show_ski_runs: true
 
 stylus-transit:
   title: Ascend OSM Transit
