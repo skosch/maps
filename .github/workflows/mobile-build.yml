@@ -1,0 +1,61 @@
+name: Mobile builds (this fork)
+
+# Builds THIS repository (unlike ascend-ci.yml's android job, which clones upstream
+#  styluslabs/maps). Run it from the Actions tab (workflow_dispatch) or on push to master.
+#  Artifacts: app-release-apk (Android, debug-signed so it installs directly) and
+#  ascend-unsigned-ipa (iOS, UNSIGNED - see the note on the ios job).
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "master" ]
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    - name: Setup JDK
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'zulu'
+        java-version: '17'
+    - name: Gradle assembleRelease
+      run: ./gww printSdkVersions assembleRelease
+      working-directory: app/android
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-release-apk
+        path: app/android/app/build/outputs/apk/release/app-release.apk
+
+  # The Xcode project's pre-build phase runs `(cd $HOME/maps && make DEBUG=0 lib)`, so the
+  #  checkout is linked at $HOME/maps. The result is deliberately unsigned (no Apple account in
+  #  CI): sideload it by re-signing with your own Apple ID (AltStore / Sideloadly / Xcode
+  #  "Devices" window), which a free Apple ID can do for 7 days at a time.
+  ios:
+    runs-on: macos-14
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    - name: Link checkout at $HOME/maps
+      run: ln -s "$GITHUB_WORKSPACE" "$HOME/maps"
+    - name: Build (unsigned)
+      run: |
+        xcodebuild -project app/ios/maps.xcodeproj -scheme Ascend \
+          -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+          -derivedDataPath build/xc \
+          CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+          build
+    - name: Package .ipa
+      run: |
+        mkdir -p Payload
+        cp -R build/xc/Build/Products/Release-iphoneos/*.app Payload/
+        zip -qr ascend-unsigned.ipa Payload
+    - name: Upload IPA
+      uses: actions/upload-artifact@v4
+      with:
+        name: ascend-unsigned-ipa
+        path: ascend-unsigned.ipa
