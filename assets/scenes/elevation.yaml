@@ -10,6 +10,11 @@ global:
     #  hillshading, zero mosaic overhead. The app toggles this via SceneUpdate from the
     #  "Texture shading" checkbox (see MapsApp::loadSceneFile).
     elevation_mosaic: false
+    # Mosaic width in units of the tile's own cell width Wp: 3 = a full neighbor cell on every
+    #  side (classic), 1 + 2k = a margin of k*Wp (k = 0.5 -> 2, 0.25 -> 1.5). MUST equal
+    #  1 + 2 * elevationMosaicMarginFrac() (rasterSource.cpp); the app sets it from the same
+    #  ASCEND_MOSAIC_MARGIN value (MapsApp::loadSceneFile).
+    elevation_mosaic_span: 3.0
     # 1 for node-registered elevation tiles (odd size, e.g. 257x257: outermost row/col is
     #  shared with the adjacent tile - true of the arcgis source below), 0 for
     #  pixel-registered (even, e.g. 256x256 terrarium) tiles. Must match the source, since
@@ -25,6 +30,19 @@ global:
     #  tile's own styling/data zoom) is what makes the drape match the terrain tileset by
     #  construction. Must match the source's tile pixel size exactly.
     elevation_tile_pixels: 256
+    # Adaptive terrain mesh density (util/builders.h terrainMeshCellsAt): a terrain tile of zoom z
+    #  is drawn with max(4, 64 >> max(0, z - refZoom)) cells per edge, refZoom = round(view zoom) +
+    #  this bias. 100 = off (always 64). MUST equal terrainMeshZoomBias() (ASCEND_TERRAIN_ZBIAS);
+    #  the app pushes it (MapsApp::loadSceneFile).
+    terrain_mesh_zbias: 100
+    # Lattice node pre-filtering (2026-10-12, "ridges zig-zag when zoomed out"): a lattice cell
+    #  spans k >= 1 DEM texels and the node used to read ONE nearest texel, i.e. unfiltered
+    #  decimation - a ridge crest is sampled or missed node by node and aliases into a sawtooth.
+    #  Nodes now read the mosaic mip chain at lod = log2(k) * this (0 = off / exact nearest
+    #  samples as before, 1 = full box filter). <1 keeps summits sharper at the cost of some
+    #  residual aliasing. One tap either way (same cost). Terrain mesh and drape lattice share the
+    #  function (latticeNodeElevation), so they cannot disagree.
+    terrain_lattice_pool: 0.7
 
 sources:
     elevation:
@@ -61,8 +79,11 @@ styles:
                 #  below (and all texture-shading code in hillshade.yaml). Compiles out entirely (no
                 #  crash, no silent degrade) when the elevation source isn't a mosaic texture.
                 ELEVATION_MOSAIC: global.elevation_mosaic
+                ELEVATION_MOSAIC_SPAN: global.elevation_mosaic_span
                 ELEVATION_TILE_OVERLAP: global.elevation_tile_overlap
                 ELEVATION_TILE_PIXELS: global.elevation_tile_pixels
+                TERRAIN_MESH_ZBIAS: global.terrain_mesh_zbias
+                LATTICE_POOL: global.terrain_lattice_pool
                 # terrainContourCoverage() (end of the global block below) reads these.
                 #  Declaring them HERE - not in the styles that call the function -
                 #  matters: the global block merges into EVERY style on the
@@ -79,6 +100,11 @@ styles:
             blocks:
                 global: |
                     #if defined(TANGRAM_FRAGMENT_SHADER) || defined(TANGRAM_VERTEX_RASTERS)
+                    // settle-time density boost (0 moving / 1 at rest), set per frame by Map::update;
+                    //  MUST match terrainMeshBoost() used for the terrain mesh selection (rasterStyle.cpp)
+                    uniform float u_terrain_mesh_boost;
+                    // reference zoom WITH hysteresis and bias applied, = terrainMeshRefZoom() (builders.h)
+                    uniform float u_terrain_ref_zoom;
                     #ifdef ELEVATION_MOSAIC
                     // The bound elevation raster is a 3Wp x 3Wp neighbor mosaic (Wp = W minus the
                     //  ELEVATION_TILE_OVERLAP shared line dropped per cell - see rasterSource.cpp)
@@ -88,9 +114,10 @@ styles:
                     //  Missing this remap entirely was the root cause of the "kaleidoscope" artifact
                     //  in the Phase 4 findings: normals/contours were computed over the whole mosaic.
                     vec2 elevationMosaicUV(vec2 uv) {
-                        vec2 msize = rasterPixelSize(ELEVATION_INDEX);  // 3 * Wp
-                        vec2 Wp = msize / 3.0;
-                        return (uv * (Wp + float(ELEVATION_TILE_OVERLAP)) + Wp) / msize;
+                        vec2 msize = rasterPixelSize(ELEVATION_INDEX);  // SPAN * Wp
+                        vec2 Wp = msize / float(ELEVATION_MOSAIC_SPAN);
+                        // own data starts at texel m = Wp * (SPAN - 1) / 2 (== Wp for SPAN 3)
+                        return (uv * (Wp + float(ELEVATION_TILE_OVERLAP)) + Wp * ((float(ELEVATION_MOSAIC_SPAN) - 1.0) * 0.5)) / msize;
                     }
                     #endif
                     vec4 sampleElevationTex(vec2 uv) {
@@ -142,6 +169,93 @@ styles:
                     //  a huge screen-space area when the surface is seen edge-on) and on
                     //  high-curvature alpine terrain - the long-standing "white patches"
                     //  (docs/terrain-illumination-plan.md).
+                    #ifdef TANGRAM_FRAGMENT_SHADER
+                    // ---- shared: rock for near-vertical drawn triangles -------------------------
+                    //  Land cover is a 2D footprint, so a wall's footprint can belong to a scree /
+                    //  grass polygon or to a GAP between polygons, painting the whole wall in the
+                    //  wrong color (or bare ground in shade as a slab). Every terrain style that
+                    //  can own a footprint (land-cover polygons, terrain-ground) calls this on its
+                    //  color: wherever the slope of the DRAWN triangle (screen-space derivatives,
+                    //  true meters) is steeper than ~54 deg (fully by ~67), the color becomes rock.
+                    //  The grain is plain 3D value noise in true-meter world position (60 m .. 0.7 m,
+                    //  each octave faded out as the pixel footprint nears its wavelength), so it
+                    //  has detail at every distance and never reads as a smooth slab or stretched.
+                    //  Must be called unconditionally (it uses derivatives).
+                    float rockHash3(vec3 p) {
+                        p = fract(p * 0.3183099 + 0.1);
+                        p *= 17.0;
+                        return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+                    }
+                    float rockVNoise(vec3 x) {
+                        vec3 i = floor(x);
+                        vec3 f = fract(x);
+                        f = f * f * (3.0 - 2.0 * f);
+                        return mix(mix(mix(rockHash3(i), rockHash3(i + vec3(1.0, 0.0, 0.0)), f.x),
+                                       mix(rockHash3(i + vec3(0.0, 1.0, 0.0)), rockHash3(i + vec3(1.0, 1.0, 0.0)), f.x), f.y),
+                                   mix(mix(rockHash3(i + vec3(0.0, 0.0, 1.0)), rockHash3(i + vec3(1.0, 0.0, 1.0)), f.x),
+                                       mix(rockHash3(i + vec3(0.0, 1.0, 1.0)), rockHash3(i + vec3(1.0, 1.0, 1.0)), f.x), f.y), f.z);
+                    }
+                    vec3 applyWallRock(vec3 col, vec3 rockCol) {
+                        vec3 wdx = dFdx(v_world_position.xyz), wdy = dFdy(v_world_position.xyz);
+                        float wUn = exp(u_map_position.y / 6378137.0);
+                        float wCos = 2.0 / (wUn + 1.0 / wUn);
+                        wdx.xy *= wCos; wdy.xy *= wCos;
+                        vec3 wc = cross(wdx, wdy);
+                        float wl = length(wc);
+                        float wnz = (wl > 1e-6 && wl < 1e9) ? abs(wc.z) / wl : 1.0;
+                        float wTan = sqrt(max(1.0 - wnz * wnz, 0.0)) / max(wnz, 0.02);
+                        float wallW = smoothstep(1.4, 2.4, wTan);
+                        float foot = max(length(wdx), length(wdy));        // meters per pixel
+                        vec3 pw = v_world_position.xyz;
+                        pw.xy *= wCos;
+                        float g = 0.0;
+                        float a = 0.0;
+                        // octave i: wavelength L, amplitude A, visible while foot < L/2.5
+                        float f0 = 1.0 - smoothstep(10.0, 30.0, foot);
+                        g += 0.34 * f0 * rockVNoise(pw / 60.0 + 3.7);       a += 0.34 * f0;
+                        float f1 = 1.0 - smoothstep(3.0, 9.0, foot);
+                        g += 0.28 * f1 * rockVNoise(pw / 18.0 + 11.3);      a += 0.28 * f1;
+                        float f2 = 1.0 - smoothstep(1.0, 3.0, foot);
+                        g += 0.20 * f2 * rockVNoise(pw / 5.5 + 5.1);        a += 0.20 * f2;
+                        float f3 = 1.0 - smoothstep(0.35, 1.0, foot);
+                        g += 0.12 * f3 * rockVNoise(pw / 1.8 + 8.9);        a += 0.12 * f3;
+                        float f4 = 1.0 - smoothstep(0.12, 0.35, foot);
+                        g += 0.06 * f4 * rockVNoise(pw / 0.6 + 2.3);        a += 0.06 * f4;
+                        float n = a > 1e-3 ? g / a : 0.5;                  // [0,1], mean ~0.5
+                        // tonal range grows with the amount of resolved detail (flat far away, where
+                        //  the polygon's own look dominates); strata-free, isotropic
+                        vec3 wallCol = rockCol * (0.80 + 0.40 * mix(0.5, n, clamp(a * 2.0, 0.0, 1.0)));
+                        return mix(col, wallCol, 0.85 * wallW);
+                    }
+                    #endif
+                    // Height of a terrain LATTICE NODE at raster uv (the value both the terrain mesh
+                    //  vertex and the drape lattice corner must use): pre-filtered to the lattice
+                    //  cell size so decimated lattices don't alias thin ridges (see
+                    //  global.terrain_lattice_pool). Exact nearest sample when the lattice is as
+                    //  fine as the DEM or on non-mosaic rasters.
+                    float latticeNodeElevation(vec2 uv) {
+                    #ifdef ELEVATION_MOSAIC
+                        if (float(LATTICE_POOL) > 0.0) {
+                            float effWp = rasterPixelSize(ELEVATION_INDEX).x / float(ELEVATION_MOSAIC_SPAN);
+                            float tSpan = effWp / float(ELEVATION_TILE_PIXELS) * u_raster_offsets[ELEVATION_INDEX].z;
+                            float rz = floor(u_tile_origin.w + log2(tSpan) + 0.5);
+                            float zr = u_terrain_ref_zoom;
+                            float mN = max(4.0, 64.0 * exp2(u_terrain_mesh_boost - min(max(rz - zr, 0.0), 6.0)));
+                            // DEM texels per lattice cell
+                            float kTex = float(ELEVATION_TILE_PIXELS) / (mN * u_raster_offsets[ELEVATION_INDEX].z);
+                            float lod = clamp(log2(max(kTex, 1.0)), 0.0, 4.0) * float(LATTICE_POOL);
+                            if (lod > 0.25) {
+                                vec4 hp = textureLod(u_rasters[ELEVATION_INDEX], elevationMosaicUV(uv), lod);
+                    #ifdef ELEVATION_FLOAT_TEX
+                                return hp.r;
+                    #else
+                                return (hp.r*256. + hp.g + hp.b/256.)*255. - 32768.;
+                    #endif
+                            }
+                        }
+                    #endif
+                        return getElevationAt(uv);
+                    }
                     float getTerrainMeshElevation(float minElev) {
                         // Lattice cell count, derived from the BOUND TEXTURE'S OWN pixel
                         //  dimensions rather than guessed from this vector tile's styling/data zoom
@@ -192,12 +306,22 @@ styles:
                         //  gone on a cold start at the same view (which settles on the real
                         //  same-zoom/composite attachment before ever painting a frame).
                     #ifdef ELEVATION_MOSAIC
-                        float effectiveWp = rasterPixelSize(ELEVATION_INDEX).x / 3.0;
+                        float effectiveWp = rasterPixelSize(ELEVATION_INDEX).x / float(ELEVATION_MOSAIC_SPAN);
                     #else
                         float effectiveWp = rasterPixelSize(ELEVATION_INDEX).x - float(ELEVATION_TILE_OVERLAP);
                     #endif
-                        float cells = 64.0 * effectiveWp / float(ELEVATION_TILE_PIXELS)
-                                    * u_raster_offsets[ELEVATION_INDEX].z;
+                        // tileSpan = elevation-tile widths the bound raster covers per vector tile
+                        //  (N for a composite, 1/2^dz for a parent-fallback proxy). The terrain mesh
+                        //  is ADAPTIVE (util/builders.h terrainMeshCellsAt): a tile of zoom zt has
+                        //  max(4, 64 >> max(0, zt - refZoom)) cells per edge, refZoom = round(view
+                        //  zoom) + bias - the identical formula, so keep the two in sync. zt is the
+                        //  zoom of the bound raster's tiles (data zoom of this tile + log2(tileSpan)).
+                        float tileSpan = effectiveWp / float(ELEVATION_TILE_PIXELS)
+                                         * u_raster_offsets[ELEVATION_INDEX].z;
+                        float rzt = floor(u_tile_origin.w + log2(tileSpan) + 0.5);
+                        float zref = u_terrain_ref_zoom;
+                        float meshN = max(4.0, 64.0 * exp2(u_terrain_mesh_boost - min(max(rzt - zref, 0.0), 6.0)));
+                        float cells = max(meshN * tileSpan, 1.0);
                         vec2 st = clamp(v_modelpos_base_zoom.xy, 0.0, 1.0) * cells;
                         vec2 cell = min(floor(st), cells - 1.0);
                         vec2 f = st - cell;
@@ -206,10 +330,10 @@ styles:
                         // clamp each node to minElev BEFORE interpolating, exactly as the terrain
                         //  mesh clamps per-vertex (terrain-3d.yaml position block), so cells
                         //  straddling the coastline interpolate the same clamped surface
-                        float h00 = max(getElevationAt(adjustRasterUV(ELEVATION_INDEX, uv00)), minElev);
-                        float h10 = max(getElevationAt(adjustRasterUV(ELEVATION_INDEX, uv00 + vec2(d, 0.0))), minElev);
-                        float h01 = max(getElevationAt(adjustRasterUV(ELEVATION_INDEX, uv00 + vec2(0.0, d))), minElev);
-                        float h11 = max(getElevationAt(adjustRasterUV(ELEVATION_INDEX, uv00 + vec2(d, d))), minElev);
+                        float h00 = max(latticeNodeElevation(adjustRasterUV(ELEVATION_INDEX, uv00)), minElev);
+                        float h10 = max(latticeNodeElevation(adjustRasterUV(ELEVATION_INDEX, uv00 + vec2(d, 0.0))), minElev);
+                        float h01 = max(latticeNodeElevation(adjustRasterUV(ELEVATION_INDEX, uv00 + vec2(0.0, d))), minElev);
+                        float h11 = max(latticeNodeElevation(adjustRasterUV(ELEVATION_INDEX, uv00 + vec2(d, d))), minElev);
                         // same fixed anti-diagonal split as the terrain mesh (rasterStyle.cpp) and as
                         //  full grid cells in buildPolygonGrid (builders.cpp), so a polygon grid at a
                         //  power-of-two multiple of the lattice nests exactly inside these triangles
@@ -217,6 +341,61 @@ styles:
                             ? h00 + f.x * (h10 - h00) + f.y * (h01 - h00)
                             : h11 + (1.0 - f.x) * (h01 - h11) + (1.0 - f.y) * (h10 - h11);
                     }
+                    #ifdef ELEVATION_MOSAIC
+                    // PERF (2026-10-10, hillshade was 165 ms/frame tilted): exact-equivalent fast
+                    //  paths for the per-fragment 3x3 / plus-shaped point-tap stencils. The generic
+                    //  getElevationAt(uv +- k*duv) re-runs the mosaic remap (3 vec2 divisions), a
+                    //  floor and a re-snap PER TAP. For a stencil around tile texel
+                    //  cen_ij = floor(ij) + 0.5 (ij = uv * W, W = Wp + overlap) the remap +
+                    //  snap algebraically collapses: tap(k) lands on mosaic texel center
+                    //  (cen_ij + k + Wp) / msize exactly (cen_ij + k + Wp is already a .5 center, and
+                    //  uv * W == ij since W is the same texwh the stencil derived duv from). So a tap
+                    //  is one add and one scale. Output is bit-for-bit the same texel as the generic
+                    //  path.
+                    float elevationTexelAt(vec2 cen_ij, vec2 k) {
+                        vec2 msize = rasterPixelSize(ELEVATION_INDEX);
+                        vec4 h = textureLod(u_rasters[ELEVATION_INDEX], (cen_ij + k + msize * ((float(ELEVATION_MOSAIC_SPAN) - 1.0) / (2.0 * float(ELEVATION_MOSAIC_SPAN)))) / msize, 0.0);
+                    #ifdef ELEVATION_FLOAT_TEX
+                        return h.r;
+                    #else
+                        return (h.r*256. + h.g + h.b/256.)*255. - 32768.;
+                    #endif
+                    }
+                    // mosaicUV = uv * p.xy + p.zw, hoisted out of per-sample calls (same value as
+                    //  elevationMosaicUV(uv), differs only by float rounding of a/b+c/b vs (a+c)/b).
+                    vec4 elevationMosaicUVParams() {
+                        vec2 msize = rasterPixelSize(ELEVATION_INDEX);
+                        vec2 Wp = msize / float(ELEVATION_MOSAIC_SPAN);
+                        return vec4((Wp + float(ELEVATION_TILE_OVERLAP)) / msize,
+                                    Wp * ((float(ELEVATION_MOSAIC_SPAN) - 1.0) * 0.5) / msize);
+                    }
+                    // blur-footprint cap (see getElevationAtLod below), hoisted
+                    float elevationMosaicMaxLod() {
+                        return log2(rasterPixelSize(ELEVATION_INDEX).x / float(ELEVATION_MOSAIC_SPAN)
+                                    * (float(ELEVATION_MOSAIC_SPAN) - 1.0) * 0.5) - 0.585;
+                    }
+                    // Raw tap of ONE mip level (no blur-footprint clamp): textureLod at an integer
+                    //  lod is a plain bilinear read of that level. textureShading() uses it to
+                    //  evaluate its pyramid with each mip fetched once instead of twice (adjacent
+                    //  trilinear samples share a level).
+                    float getElevationAtMipP(vec2 uv, float mip, vec4 p) {
+                        vec4 h = textureLod(u_rasters[ELEVATION_INDEX], uv * p.xy + p.zw, mip);
+                    #ifdef ELEVATION_FLOAT_TEX
+                        return h.r;
+                    #else
+                        return (h.r*256. + h.g + h.b/256.)*255. - 32768.;
+                    #endif
+                    }
+                    // getElevationAtLod with its per-call invariants supplied by the caller
+                    float getElevationAtLodP(vec2 uv, float lod, vec4 p, float maxLod) {
+                        vec4 h = textureLod(u_rasters[ELEVATION_INDEX], uv * p.xy + p.zw, min(lod, maxLod));
+                    #ifdef ELEVATION_FLOAT_TEX
+                        return h.r;
+                    #else
+                        return (h.r*256. + h.g + h.b/256.)*255. - 32768.;
+                    #endif
+                    }
+                    #endif
                     #ifdef ELEVATION_MOSAIC
                     // u_rasters[ELEVATION_INDEX] is assumed to be a 3Wp x 3Wp "mosaic" texture per the
                     //  Frozen Interface Contract (docs/texture-shading-plan.md): tile's own data centered
@@ -235,7 +414,7 @@ styles:
                         //  band consistent across the shared edge; deeper bands then difference to zero
                         //  in textureShading()'s pyramid, smoothly fading out instead of seaming.
                         //  log2(1.5) ~ 0.585; Wp = rasterPixelSize/3 (see elevationMosaicUV above).
-                        float maxLod = log2(rasterPixelSize(ELEVATION_INDEX).x / 3.0) - 0.585;
+                        float maxLod = elevationMosaicMaxLod();
                         vec4 h = textureLod(u_rasters[ELEVATION_INDEX], elevationMosaicUV(uv), min(lod, maxLod));
                     #ifdef ELEVATION_FLOAT_TEX
                         return h.r;
@@ -291,12 +470,23 @@ styles:
                         vec2 st = currentRasterUV(ELEVATION_INDEX);
                         vec2 texwh = rasterPixelSize(ELEVATION_INDEX);
                         #ifdef ELEVATION_MOSAIC
-                        texwh = texwh / 3.0 + float(ELEVATION_TILE_OVERLAP);
+                        texwh = texwh / float(ELEVATION_MOSAIC_SPAN) + float(ELEVATION_TILE_OVERLAP);
                         #endif
                         vec2 duv = 1./texwh;
                         vec2 ij = st * texwh;
                         vec2 cen_ij = floor(ij) + 0.5;
                         vec2 uv = cen_ij*duv;
+                        #ifdef ELEVATION_MOSAIC
+                        float h00 = elevationTexelAt(cen_ij, vec2(-1., -1.));
+                        float h01 = elevationTexelAt(cen_ij, vec2(-1.,  0.));
+                        float h02 = elevationTexelAt(cen_ij, vec2(-1.,  1.));
+                        float h10 = elevationTexelAt(cen_ij, vec2( 0., -1.));
+                        float h11 = elevationTexelAt(cen_ij, vec2( 0.,  0.));
+                        float h12 = elevationTexelAt(cen_ij, vec2( 0.,  1.));
+                        float h20 = elevationTexelAt(cen_ij, vec2( 1., -1.));
+                        float h21 = elevationTexelAt(cen_ij, vec2( 1.,  0.));
+                        float h22 = elevationTexelAt(cen_ij, vec2( 1.,  1.));
+                        #else
                         float h00 = getElevationAt(uv - duv);
                         float h01 = getElevationAt(uv + vec2(-duv.x, 0.));
                         float h02 = getElevationAt(uv + vec2(-duv.x, duv.y));
@@ -306,6 +496,7 @@ styles:
                         float h20 = getElevationAt(uv + vec2(duv.x, -duv.y));
                         float h21 = getElevationAt(uv + vec2(duv.x, 0.));
                         float h22 = getElevationAt(uv + duv);
+                        #endif
                         #ifndef ELEVATION_MOSAIC
                         // handle edge of tile by extrapolating (with a mosaic, real neighbor-tile data
                         //  exists beyond the tile edge, so the out-of-range samples above are valid)

@@ -1,9 +1,12 @@
 #include "mapsapp.h"
 #include "scene/scene.h"
+#include "data/rasterSource.h"
+#include "util/builders.h"
 #include "debug/textDisplay.h"
 #include "util.h"
 #include "pugixml.hpp"
 #include <sys/stat.h>
+#include <cstdlib>
 #include <fstream>
 #include <chrono>
 #include <thread>
@@ -794,7 +797,34 @@ void MapsApp::loadSceneFile(bool async, bool setPosition)
   if(terrain3D) { options.updates.push_back(SceneUpdate{"scene.terrain_3d", "true"}); }
   // compiles in the ELEVATION_MOSAIC shader path and enables neighbor prefetch + mosaic
   //  stitching for the elevation source (see elevation.yaml, hillshade.yaml, scene.cpp)
-  if(textureShading) { options.updates.push_back(SceneUpdate{"global.elevation_mosaic", "true"}); }
+  if(textureShading) {
+    options.updates.push_back(SceneUpdate{"global.elevation_mosaic", "true"});
+    // mosaic neighbor-ring margin (ASCEND_MOSAIC_MARGIN, see elevationMosaicMarginFrac()); the
+    //  shader must use the same layout the stitcher produces
+    options.updates.push_back(SceneUpdate{"global.elevation_mosaic_span",
+        std::to_string(1.0 + 2.0 * double(Tangram::elevationMosaicMarginFrac()))});
+  }
+  // A/B perf experiments without touching config: ASCEND_SCENE_UPDATES="path=value;path=value",
+  //  e.g. "styles.hillshade.shaders.uniforms.u_shadow_strength=0" (cast shadows off) or
+  //  "styles.hillshade.shaders.uniforms.u_texture_shading_levels=1". Applied last, so they win.
+  if(const char* extra = getenv("ASCEND_SCENE_UPDATES")) {
+    std::string s(extra);
+    size_t pos = 0;
+    while(pos < s.size()) {
+      size_t end = s.find(';', pos);
+      if(end == std::string::npos) { end = s.size(); }
+      std::string item = s.substr(pos, end - pos);
+      size_t eq = item.find('=');
+      if(eq != std::string::npos && eq > 0) {
+        options.updates.push_back(SceneUpdate{item.substr(0, eq), item.substr(eq + 1)});
+      }
+      pos = end + 1;
+    }
+  }
+  // adaptive terrain mesh density: shader must use the same reference-zoom bias as the CPU
+  //  (terrainMeshZoomBias(), ASCEND_TERRAIN_ZBIAS)
+  options.updates.push_back(SceneUpdate{"global.terrain_mesh_zbias",
+      std::to_string(Tangram::terrainMeshZoomBias())});
   options.updates.push_back(SceneUpdate{"global.metric_units", metricUnits ? "true" : "false"});
   options.updates.push_back(SceneUpdate{"global.shuffle_seed", std::to_string(shuffleSeed)});
   options.updates.push_back(SceneUpdate{"global.selected_osm_id", "~"});  // ensure Node exists
@@ -922,6 +952,54 @@ void MapsApp::mapUpdate(double time)
       }
     }
     lastAutoContrastTime = time;
+  }
+
+  // Scripted, repeatable benchmark path for A/B perf comparisons (ASCEND_BENCH=1): hand-panned
+  //  captures differ in camera distance/content so their LOD and cost can't be compared (see
+  //  docs/dem-saliency-lod-plan.md). Warm up at the launch view with a fixed tilt until tile
+  //  loading settles, then capture while orbiting rotation 0 -> 180 deg with a small zoom
+  //  oscillation, then stop and write the trace. Env: ASCEND_BENCH_WARMUP (s, default 20),
+  //  ASCEND_BENCH_DURATION (s, default 40), ASCEND_BENCH_TILT (deg, default 72).
+  {
+    static const bool benchEnabled = getenv("ASCEND_BENCH") && atoi(getenv("ASCEND_BENCH")) != 0;
+    if(benchEnabled && map->getScene() && map->getScene()->isReady()) {
+      static double benchT0 = -1, captureT0 = -1;
+      static CameraPosition base;
+      static bool done = false;
+      const double warm = getenv("ASCEND_BENCH_WARMUP") ? atof(getenv("ASCEND_BENCH_WARMUP")) : 20.0;
+      const double dur = getenv("ASCEND_BENCH_DURATION") ? atof(getenv("ASCEND_BENCH_DURATION")) : 40.0;
+      const float tilt = (getenv("ASCEND_BENCH_TILT") ? atof(getenv("ASCEND_BENCH_TILT")) : 72.0) * M_PI/180;
+      // optional stationary phase at the START of the capture (s, default 0): measures the
+      //  settled-state cost (e.g. the settle-time terrain mesh boost) that a continuous orbit never reaches
+      const double rest = getenv("ASCEND_BENCH_REST") ? atof(getenv("ASCEND_BENCH_REST")) : 0.0;
+      if(!done) {
+        if(benchT0 < 0) { benchT0 = time; base = map->getCameraPosition(); base.tilt = tilt; base.rotation = 0; }
+        double t = time - benchT0;
+        CameraPosition cp = base;
+        if(captureT0 < 0) {
+          // wait for warm-up time AND for tile loading to settle (or give up after 3x warm-up)
+          if(t >= warm && (mapState.viewComplete() || t >= 3*warm)) {
+            captureT0 = time;
+            if(!Tangram::Profiler::isCapturing()) toggleProfilerCapture();
+          }
+        }
+        if(captureT0 >= 0) {
+          double u = (time - captureT0 - rest) / dur;
+          if(u < 0.0) {
+            // stationary phase: hold the base camera
+          } else if(u >= 1.0) {
+            if(Tangram::Profiler::isCapturing()) toggleProfilerCapture();
+            LOGW("Benchmark complete");
+            done = true;
+          } else if(u >= 0.0) {
+            cp.rotation = float(u * M_PI);           // 0 -> 180 deg
+            cp.zoom = base.zoom + 0.4f * float(std::sin(u * 2 * M_PI));
+          }
+        }
+        map->setCameraPosition(cp);
+        platform->requestRender();
+      }
+    }
   }
 
   mapState = map->update(time - lastFrameTime);
@@ -2476,6 +2554,16 @@ void MapsApp::setDpi(float dpi)
 MapsApp::MapsApp(Platform* _platform) : touchHandler(new TouchHandler(this))
 {
   TRACE_INIT();
+  // Perf-push defaults (2026-10-11), read by the tangram core on first use; an explicit
+  //  environment value still wins (ASCEND_DEM_LOD=0 / ASCEND_MOSAIC_MARGIN=1 = old behavior).
+  //  Saliency DEM LOD: sharper AND faster in A/B traces. Mosaic margin 0.25: 4x fewer mosaic
+  //  bytes, removed the late-orbit GPU blowup and the tile-cache thrash.
+  setenv("ASCEND_DEM_LOD", "1", 0);
+  setenv("ASCEND_MOSAIC_MARGIN", "0.25", 0);
+  setenv("ASCEND_TERRAIN_ZBIAS", "0", 0);
+  // dynamic resolution: scene rendered at this fraction of the viewport while the camera moves
+  //  (full resolution again 250 ms after it stops); ASCEND_RENDER_SCALE=1 disables
+  setenv("ASCEND_RENDER_SCALE", "0.75", 0);  // adaptive terrain mesh density; 100 = off (always 64)
   inst = this;
   platform = _platform;
   mainThreadId = std::this_thread::get_id();

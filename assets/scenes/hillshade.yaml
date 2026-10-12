@@ -387,8 +387,15 @@ styles:
                 SHOW_CONTOURS: global.show_contours
             uniforms:
                 u_contour_default: global.contour_default
+                # see stylus-osm.yaml unlit-polygons: a wall's 2D footprint can fall in a gap
+                #  between land-cover polygons, which would show this ground as a slab as tall as
+                #  the wall - near-vertical drawn triangles are painted as rock here too
+                u_wall_rock_color: global.color.rock
             blocks:
                 color: |
+                    // wall rock for near-vertical drawn triangles (applyWallRock, elevation.yaml):
+                    //  gaps between land-cover polygons would otherwise show this ground as a slab
+                    color.rgb = applyWallRock(color.rgb, u_wall_rock_color.rgb);
                     #ifdef SHOW_CONTOURS
                     // Default-colored contours on bare earth. This style is the baseline
                     //  under every land-cover polygon (which repaints the same pixels with
@@ -554,6 +561,11 @@ styles:
                 u_shadow_soft: 0.15
                 u_shadow_bias: 0.01
                 u_shadow_d0: 1.5
+                # PERF experiment (2026-10-11): 1 = round each march step's mip lod to an integer, so
+                #  the tap is a single-level bilinear read instead of trilinear (half the sampler
+                #  work per step, slightly steppier penumbra). 0 = exact previous look. A/B via
+                #  ASCEND_SCENE_UPDATES="styles.hillshade.shaders.uniforms.u_shadow_lod_quant=1".
+                u_shadow_lod_quant: 0.0
                 # Phase 3/4 debugging (docs/terrain-lighting-v2-plan.md): direct-luminance
                 #  "Schattenton" shadow darkening, alongside (not instead of) the sun-term
                 #  multiply above - see shadow_amt/the L *= mix(...) in the color block. 0.25
@@ -610,6 +622,12 @@ styles:
                     //  style). Block-merge order across mixed styles isn't guaranteed, so declare the
                     //  prototype here rather than rely on getElevationAtLod's definition coming first.
                     float getElevationAtLod(vec2 uv, float lod);
+                    // same forward-declaration reason, for the hoisted-invariant LOD helpers
+                    //  (elevation.yaml, ELEVATION_MOSAIC branch)
+                    vec4 elevationMosaicUVParams();
+                    float elevationMosaicMaxLod();
+                    float getElevationAtLodP(vec2 uv, float lod, vec4 p, float maxLod);
+                    float getElevationAtMipP(vec2 uv, float mip, vec4 p);
                     float textureShading(vec2 uv, float texelMeters) {
                         // anchor the pyramid to *continuous* view zoom, not the integer tile zoom:
                         //  the fractional base lod b rises 0 -> 1 as the view zooms in across one tile
@@ -629,14 +647,39 @@ styles:
                         //  a whole range is in view); linear in continuous zoom, so no visible steps
                         float ts_a = mix(u_texture_shading_alpha_min, u_texture_shading_alpha,
                                          clamp((u_map_position.z - 10.5) / 2.5, 0.0, 1.0));
+                        // PERF (exact-equivalent): the band sum is LINEAR in the mip pyramid, so
+                        //  instead of L+1 independent trilinear taps T_k = lerp(B[n+k], B[n+k+1], f)
+                        //  (n = floor(b), f = fract(b); every adjacent pair re-fetches a level), fetch
+                        //  each integer mip B[n+j] ONCE and weight it directly:
+                        //    z = sum_k w_k (T_k - T_{k+1}) = sum_k u_k T_k
+                        //      u_0 = w_0, u_k = w_k - w_{k-1}, u_L = -w_{L-1}
+                        //      = sum_j B[n+j] * ((1-f) u_j + f u_{j-1}).
+                        //  L+2 bilinear reads instead of 2(L+1). Taps whose lod would exceed the
+                        //  blur-footprint cap maxLod all return the same value Tc, so their bands are
+                        //  zero and their u's telescope to -w_{kc-1} on a single capped tap.
                         float z = 0.0;
-                        float h_prev = getElevationAtLod(uv, b);
-                        for (int k = 0; k < TEXTURE_SHADING_MAX_LEVELS; k++) {
-                            if (float(k) >= u_texture_shading_levels) { break; }
-                            float h_next = getElevationAtLod(uv, b + float(k + 1));
-                            // band k = LoD_k - LoD_(k+1), i.e. what mip level k+1's blur removes from level k
-                            z += (h_prev - h_next) * pow(2.0, -float(k) * ts_a);
-                            h_prev = h_next;
+                        vec4 mp = elevationMosaicUVParams();
+                        float maxLod = elevationMosaicMaxLod();
+                        int L = int(min(ceil(u_texture_shading_levels), float(TEXTURE_SHADING_MAX_LEVELS)));
+                        // number of uncapped samples k (b + k < maxLod), k = 0..L
+                        int kc = int(clamp(ceil(maxLod - b), 0.0, float(L + 1)));
+                        if (L >= 1 && kc >= 1) {
+                            float nb = floor(b), fb = b - nb;
+                            float wstep = exp2(-ts_a);
+                            float w = 1.0, wprev = 0.0, uprev = 0.0;
+                            for (int j = 0; j <= TEXTURE_SHADING_MAX_LEVELS + 1; j++) {
+                                if (j > kc) { break; }
+                                float uj = 0.0;
+                                if (j < kc) { uj = (j < L) ? (w - wprev) : -wprev; }
+                                float cj = (1.0 - fb) * uj + fb * uprev;
+                                z += cj * getElevationAtMipP(uv, nb + float(j), mp);
+                                uprev = uj;
+                                wprev = w;
+                                w *= wstep;
+                            }
+                            if (kc <= L) {
+                                z -= exp2(-ts_a * float(kc - 1)) * getElevationAtLodP(uv, maxLod, mp, maxLod);
+                            }
                         }
                         // normalize the band sum (meters) by the ground size of the base band's sampling
                         //  scale (texel spacing * 2^b, also continuous across tile-zoom swaps) to make it
@@ -661,31 +704,57 @@ styles:
                         //  the normal block's gradient convention - see the plan doc Phase 4 results note)
                         vec2 sdir_uv = sdir / (dxy_elev * texwh);
                         float tanSun = s_world.z / max(length(s_world.xy), 1e-4);
-                        // march reach: keep uv + sdir_uv*d inside [-0.95, 1.95] on both axes
+                        // march reach: keep uv + sdir_uv*d inside [-(r-0.05), 1+(r-0.05)] on both axes,
+                        //  r = margin in tile widths (1 for the classic 3-cell mosaic: [-0.95, 1.95])
+                        float reach = (float(ELEVATION_MOSAIC_SPAN) - 1.0) * 0.5 - 0.05;
                         vec2 dmax2 = vec2(1e9);
-                        if (sdir_uv.x > 1e-9) { dmax2.x = (1.95 - uv.x) / sdir_uv.x; }
-                        else if (sdir_uv.x < -1e-9) { dmax2.x = (-0.95 - uv.x) / sdir_uv.x; }
-                        if (sdir_uv.y > 1e-9) { dmax2.y = (1.95 - uv.y) / sdir_uv.y; }
-                        else if (sdir_uv.y < -1e-9) { dmax2.y = (-0.95 - uv.y) / sdir_uv.y; }
+                        if (sdir_uv.x > 1e-9) { dmax2.x = (1.0 + reach - uv.x) / sdir_uv.x; }
+                        else if (sdir_uv.x < -1e-9) { dmax2.x = (-reach - uv.x) / sdir_uv.x; }
+                        if (sdir_uv.y > 1e-9) { dmax2.y = (1.0 + reach - uv.y) / sdir_uv.y; }
+                        else if (sdir_uv.y < -1e-9) { dmax2.y = (-reach - uv.y) / sdir_uv.y; }
                         float dmax = min(dmax2.x, dmax2.y);
                         float d = u_shadow_d0 * dxy_elev.x;                        // start ~1.5 texels out
                         float sh = 0.0;
+                        // PERF: lod = log2(d/dxy) - 2 grows by log2(1.64) per step (d *= 1.64 below), so
+                        //  carry it incrementally instead of a log2 + division per step; per-sample
+                        //  mosaic invariants hoisted as in textureShading()
+                        vec4 mp = elevationMosaicUVParams();
+                        float maxLod = elevationMosaicMaxLod();
+                        float lodv = log2(max(u_shadow_d0, 1e-6)) - 2.0;
+                        float invDmax = 1.0 / dmax;
+                        // PERF (visual-neutral-ish, 2026-10-10): for minified (distant, steeply tilted)
+                        //  pixels one pixel spans fp >> 1 texels, so the first few march steps (d0
+                        //  grows x1.64 per step from ~1.5 texels) land INSIDE the pixel's own footprint
+                        //  and can't be resolved on screen anyway. Skip steps whose distance is under
+                        //  half the footprint - same reach (steps just start later), no fetch spent
+                        //  there. fp == ~1 for near/top-down pixels: nothing skipped. Derivatives are
+                        //  safe here: sunShadow() is only called inside a uniform-coherent branch.
+                        vec2 fpv = fwidth(uv * texwh);
+                        float dskip = 0.5 * max(fpv.x, fpv.y) * dxy_elev.x;
                         for (int i = 0; i < TERRAIN_SHADOW_STEPS; i++) {
                             if (d > dmax) { break; }
-                            float lod = max(log2(d / dxy_elev.x) - 2.0, 0.0);      // getElevationAtLod caps internally
-                            float h = getElevationAtLod(uv + sdir_uv * d, lod);
+                            if (d < dskip) {
+                                d *= 1.64;
+                                lodv += 0.71358;
+                                continue;
+                            }
+                            float lod = max(lodv, 0.0);                             // getElevationAtLodP caps at maxLod
+                            if (u_shadow_lod_quant > 0.5) { lod = floor(lod + 0.5); }
+                            float h = getElevationAtLodP(uv + sdir_uv * d, lod, mp, maxLod);
                             // horizon tangent in true-meter space; u_shadow_bias tilts the ray up slightly to
                             //  prevent self-shadow acne from mip-blurred near samples
                             float tanH = (h - h0) / (d * coslat) - u_shadow_bias;
                             float s_i = clamp((tanH - tanSun) / max(u_shadow_soft, 1e-3), 0.0, 1.0);
                             // fade shadow found near the reach cap (adjacent tiles' mosaics disagree there)
-                            s_i *= 1.0 - smoothstep(0.7, 1.0, d / dmax);
+                            s_i *= 1.0 - smoothstep(0.7, 1.0, d * invDmax);
                             sh = max(sh, s_i);
+                            if (sh >= 1.0) { break; }   // fully shadowed: later steps can't raise it (max)
                             // Perf (2026-07-11): growth raised 1.45 -> 1.64 alongside
                             //  TERRAIN_SHADOW_STEPS 16 -> 12 above, so d0 * growth^steps (the
                             //  march's total reach) stays the same - coarser intermediate
                             //  sampling, same maximum shadow-casting distance.
                             d *= 1.64;
+                            lodv += 0.71358;   // log2(1.64)
                         }
                         return sh;   // 0 = fully sunlit, 1 = fully shadowed
                     }
@@ -699,7 +768,7 @@ styles:
                     //  line dropped per cell - see elevation.yaml); all the tile-local texel math below
                     //  (texel centers, finite-difference offsets, meters-per-texel) wants the tile's
                     //  own sample count W. getElevationAt() itself does the mosaic UV remap.
-                    texwh = texwh / 3.0 + float(ELEVATION_TILE_OVERLAP);
+                    texwh = texwh / float(ELEVATION_MOSAIC_SPAN) + float(ELEVATION_TILE_OVERLAP);
                     #endif
                     vec2 duv = 1./texwh;
                     vec2 ij = st * texwh;
@@ -708,6 +777,18 @@ styles:
                     //  discard;
                     vec2 cen_ij = floor(ij) + 0.5;
                     vec2 uv = cen_ij*duv;
+                    #ifdef ELEVATION_MOSAIC
+                    // exact-equivalent fast taps, see elevationTexelAt() in elevation.yaml
+                    float h00 = elevationTexelAt(cen_ij, vec2(-1., -1.));
+                    float h01 = elevationTexelAt(cen_ij, vec2(-1.,  0.));
+                    float h02 = elevationTexelAt(cen_ij, vec2(-1.,  1.));
+                    float h10 = elevationTexelAt(cen_ij, vec2( 0., -1.));
+                    float h11 = elevationTexelAt(cen_ij, vec2( 0.,  0.));
+                    float h12 = elevationTexelAt(cen_ij, vec2( 0.,  1.));
+                    float h20 = elevationTexelAt(cen_ij, vec2( 1., -1.));
+                    float h21 = elevationTexelAt(cen_ij, vec2( 1.,  0.));
+                    float h22 = elevationTexelAt(cen_ij, vec2( 1.,  1.));
+                    #else
                     float h00 = getElevationAt(uv - duv);
                     float h01 = getElevationAt(uv + vec2(-duv.x, 0.));
                     float h02 = getElevationAt(uv + vec2(-duv.x, duv.y));
@@ -717,6 +798,7 @@ styles:
                     float h20 = getElevationAt(uv + vec2(duv.x, -duv.y));
                     float h21 = getElevationAt(uv + vec2(duv.x, 0.));
                     float h22 = getElevationAt(uv + duv);
+                    #endif
                     #ifndef ELEVATION_MOSAIC
                     // handle edge of tile by extrapolating (with a mosaic, real neighbor-tile data
                     //  exists beyond the tile edge, so the out-of-range samples above are valid)

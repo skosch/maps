@@ -11,7 +11,11 @@ global:
   camera_settings: { type: perspective }
   # globals required for hillshading
   earth_style: unlit-polygons
-  earth_color: "#E0E0E0" #[.97, .955, .94] #'#f0ebeb'
+  # Darkening round (2026-08-23, Sebastian: "mountains are too light"): #E0E0E0 -> here;
+  #  trajectory so far [#F7F3F0 -> #F0EBEB -> #E0E0E0 -> this]. Bare unclassified ground is
+  #  most of every mountain flank that carries no land-cover polygon, so its lightness sets
+  #  the floor for the whole range's read. Also scene background / hillshade terrain-ground.
+  earth_color: "#CBC7BF"
   earth_order: 599 # should be above all other polygons
   #elevation_sources: []
   marker_font: IBM Plex Sans
@@ -73,13 +77,19 @@ global:
     hot_spring: orange
     beach: "#FEEFC3" #[1.000,0.953,0.900]
     ice: "#DDECEC"
-    rock: "#E1D9D1"
+    # Darkening rounds (2026-08-23, Sebastian: "mountains are too light", then "rock is
+    #  not dark enough" after round 1): rock E1D9D1 -> C2B8AB -> A09584, rock_shadow
+    #  A69C8E -> 877E6F -> 6E6555; scree F5F0E5 -> DCD4C3 (round 1 only - scoped to rock
+    #  in round 2). Ice/glacier deliberately untouched - the lightness there is the
+    #  point. rock_shadow keeps ~the same ratio under the new rock so gully weathering
+    #  stays a step darker, not flatter.
+    rock: "#A09584"
     # rock-texture-v2 (docs/rock-texture-v2-plan.md): weathered/damp rock in gullies and
     #  concave microsites, and a muted lichen/moss crust accent common on exposed alpine
     #  rock worldwide regardless of geology - see styles.rock-texture's color block.
-    rock_shadow: "#A69C8E"
+    rock_shadow: "#6E6555"
     rock_lichen: "#9B9457"
-    scree: "#F5F0E5"
+    scree: "#DCD4C3"
     road: "#fff"
     casing_16: "#999"
     casing_18: "#aaa"
@@ -648,6 +658,14 @@ cameras:
 #    filtering: mipmap
 #    wrap: repeat
 
+textures:
+  # Baked ridged-multifractal for the rock-texture style - regenerate with
+  #  scripts/bake_rock_noise.py. mipmap = the anti-aliasing (band-limit), repeat = tiling.
+  rock_noise:
+    url: ../textures/rock_ridged_noise.png
+    filtering: mipmap
+    wrap: repeat
+
 styles:
   # blend_order -1000 to draw buildings just above other geometry; blend_order -110 to -100 reserved by app
   heightglow:
@@ -670,6 +688,11 @@ styles:
     base: lines
     blend_order: -999
     mix: heightglow
+
+  # alpine land cover (scree, glacier): same look as unlit-polygons, finest drape grid
+  unlit-polygons-alpine:
+    mix: unlit-polygons
+    terrain_grid: 256
 
   unlit-lines:
     base: lines
@@ -694,7 +717,12 @@ styles:
     base: polygons
     mix: global.terrain_3d_mixin
     lighting: false
-    terrain_grid: 256
+    # 2026-10-12: the draped polygon grid must be as fine as the terrain lattice or triangles
+    #  chord across relief and the hillshade overlay fails its depth test (unshaded patches).
+    #  That only matters on rugged ground, and the fine grid costs vertices (GPU + tile build
+    #  time), so general land cover (forest, farmland, ...) is capped at 128 and the alpine
+    #  classes (rock, scree, glacier) use unlit-polygons-alpine below at the full 256.
+    terrain_grid: 128
     # Land-cover-colored contour lines (Wanderkarte style, Sebastian: light blue on
     #  glaciers, grayish brown on mountain rock, darker green in forest). The lines are
     #  drawn HERE, inside the cover styles, rather than by hillshade's blend-over pass:
@@ -722,8 +750,19 @@ styles:
         u_forest_fill: global.color.forest
         u_ice_fill: global.color.ice
         u_water_fill: global.color.water
+        # what a (near-)vertical drawn triangle is painted as, whatever land cover owns its 2D
+        #  footprint (see the color block)
+        u_wall_rock_color: global.color.rock
       blocks:
         color: |
+          #ifndef ROCK_STYLE
+          {
+              // wall rock for near-vertical drawn triangles whatever land cover owns the footprint
+              //  (applyWallRock, elevation.yaml); rock-texture is excluded - it textures walls itself
+              vec3 wallCol = applyWallRock(color.rgb, u_wall_rock_color.rgb);
+              if (distance(color.rgb, u_water_fill.rgb) >= 0.02) { color.rgb = wallCol; }
+          }
+          #endif
           #ifdef SHOW_CONTOURS
           {
               float contourCov = terrainContourCoverage();
@@ -760,6 +799,7 @@ styles:
     terrain_grid: 256
     shaders:
       defines:
+        ROCK_STYLE: true
         SHOW_CONTOURS: global.show_contours
       uniforms:
         # land-cover-colored contour lines (Wanderkarte style): bare rock wears the
@@ -780,11 +820,14 @@ styles:
         #  (octaves span scale..scale/20); 400m calibrated by Sebastian's "half the
         #  Matterhorn" round-10 framing. Live-tunable via GUI slider.
         u_rock_scale: 400.0
+        u_rock_noise_tex: rock_noise
         # overall CONTRAST of the material blend (mix weight toward the procedural
         #  material + weathering/lichen blend, see color block) - 0 = flat original
         #  palette color, 1 = full effect. Independent of u_rock_normal_strength (the
-        #  bump-lighting contrast).
-        u_rock_strength: 0.35
+        #  bump-lighting contrast). Darkening rounds 2026-08-23: 0.35 -> 0.55 ("more rock
+        #  textured") -> 0.65 (round 2, "not dark enough" - more weight on the darker-mean
+        #  procedural material over the flat palette).
+        u_rock_strength: 0.65
         # how much the REAL DEM curvature (5-tap Laplacian) weighs into the material
         #  weathering blend (color block) - correlates weathered/fresh coloring with
         #  actual gullies/spines instead of looking entirely pasted-on
@@ -804,131 +847,101 @@ styles:
         #  an honest no-op (the light term is computed as a DELTA from the unperturbed
         #  normal specifically so it never re-shades the macro slope hillshade's own
         #  blend-over already covers). The microLight clamp (round 12) is structurally
-        #  safe at any strength, so this is purely an aesthetic dial.
-        u_rock_normal_strength: 1.0
+        #  safe at any strength, so this is purely an aesthetic dial. Darkening round
+        #  2026-08-23: 1.0 -> 1.3 ("more rock textured" - starts the safe dial further up).
+        u_rock_normal_strength: 1.3
         # ROUND 11: contrast boost applied to the final material color (fractal +
         #  weathering + lichen combined) before it's blended into color.rgb - see the
         #  color block for why (hillshade's translucent 3D shadow overlay attenuates
         #  whatever's underneath, this pre-compensates so real texture detail survives
         #  visible). 1 = no boost (honest no-op: mix(gray, color, 1.0) == color).
-        u_rock_contrast: 1.7
+        #  ROUND 15: 1.7 -> 2.0 (Sebastian: "at regular zoom levels like 12-14 the
+        #  texture isn't noticeable at all"). At those zooms the view is top-down, so
+        #  macro normals point at the camera: the bump-lighting delta is nearly zero
+        #  and albedo modulation is the only texture carrier, while hillshade's
+        #  blend-over still taxes it - the boost pivots contrast around the mean gray
+        #  to push more of it through.
+        u_rock_contrast: 2.0
+        # CLIFF READABILITY (2026-10-12, Berann-style; replaces the strata/baked-couloir attempt).
+        #  Nothing here is pasted-on pattern: every term is derived from the DEM measured in the
+        #  surface-NORMAL direction (cavity = how far the center sits behind the mean of its
+        #  neighbours, along the face normal - a cheap mean-free-path / ambient-occlusion proxy)
+        #  at two lateral scales, plus where the local slope is flatter than its steeper
+        #  surroundings (ledges). 0 disables each.
+        # cavity: darkening of chimneys / couloirs / gullies
+        u_rock_cavity_strength: 0.55
+        # ledge/rib light: sky-lit upward facets and convex ribs catch light
+        u_rock_ledge_light: 0.35
+        # snow dusting: above the latitude-dependent snow line, on gentle ground and on ledges
+        u_rock_snow_strength: 0.8
+        # how the cliff/snow decisions get their slope + height (snow disappeared with the first
+        #  geometry-aware version, root cause not yet isolated - switchable for A/B):
+        #  0 = DEM only (the original, known-good snow), 1 = + slope of the drawn triangle,
+        #  2 = + slope of the drawn triangle, fragment world-z snow line, aspect
+        u_rock_geo_mode: 2.0
+        # CLIFF RELIEF (invented detail where the DEM has none): on walls the fractal's fall-line
+        #  anisotropy flips from STRETCHED along the fall line (vertical thread - what a heightfield
+        #  wall already looks like) to COMPRESSED (E < 1: thin horizontal ledge bands that vary in
+        #  height and length because the field is multi-octave ridged noise, not periodic strata).
+        #  1.0 = no change vs. the old look; ~0.4 = ledges ~2.5x thinner than they are long.
+        u_rock_ledge_aniso: 0.4
+        # extra bump-relief multiplier on walls (0 = none): ledge tops catch light, undersides go dark
+        u_rock_cliff_relief: 1.5
+        # 0 = off; 1 = snow debug (R gate, G accum, B snow); 2 = (steep/2, cavity, ledge)
+        u_rock_debug: 0.0
       blocks:
         global: |
           #ifdef TANGRAM_FRAGMENT_SHADER
-          // ROUND 13 (docs/rock-texture-v2-plan.md): procedural FILTERED ridged
-          //  multifractal replaces the rounds-6-12 marble-photo sampling (Sebastian:
-          //  "fractal surface... extremely fast and realistic"; ref iq's Rain Forest /
-          //  "Painting with math" fBm techniques). The two structural additions over the
-          //  failed rounds 1-5 procedural attempts: analytic derivatives (one evaluation
-          //  yields value AND gradient - albedo and bump normal from a single pass, no
-          //  finite-difference resampling) and per-octave screen-space amplitude fading
-          //  (the analytic equivalent of mip selection, which is what kills the
-          //  aliasing/moire every earlier procedural round died of). rockHash/rockNoise
-          //  below are kept unchanged from those rounds - they only feed the lichen mask,
-          //  and never had the aliasing problems (smooth interpolated hash noise, not a
-          //  periodic wave or cell search).
-          float rockHash(vec2 p) {
-              return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+          // ROUND 16 (perf, 2026-10-10): the ridged multifractal is BAKED, not evaluated
+          //  per fragment. scripts/bake_rock_noise.py renders the same Musgrave cascade
+          //  ((1-|n|)^2 fold, weight cascade, 5 octaves, analytic gradient) once into a
+          //  tileable 1024^2 RGBA8 texture (assets/textures/rock_ridged_noise.png):
+          //    R = field value ~[0,1]   GB = d(value)/dp (p in base cells, +-ROCK_GRAD_RANGE)
+          //    A = lichen-patch mask in [0,1]
+          //  Per fragment this is ONE trilinear fetch per triplanar plane (3 total, +3 for
+          //  lichen only on the sites that need it) instead of up to 11 gradient-noise
+          //  octaves x 4 sin() hashes - that evaluation was 56% of all GPU time in a
+          //  tilted Iris Xe capture. The mip chain IS the old per-octave screen-space fade
+          //  (a box band-limit of the field; value and gradient filter identically), so the
+          //  anti-aliasing argument of round 13 carries over unchanged. The fall-line
+          //  anisotropy is just a UV transform before the fetch. Differences from the
+          //  per-fragment version, all inherent to making it periodic: LAC is exactly 2
+          //  (was 2.13), octaves differ by lattice seed rather than domain rotation (the
+          //  three runtime plane rotations re-break alignment), and the pattern repeats
+          //  every ROCK_TEX_CELLS * u_rock_scale meters (was ~400 km).
+          const float ROCK_TEX_CELLS = 16.0;    // keep in sync with bake_rock_noise.py CELLS
+          const float ROCK_GRAD_RANGE = 8.0;    // keep in sync with bake_rock_noise.py
+          // One plane's worth of the field with fall-line anisotropy folded in (outer-
+          //  product stretch of the domain along dir; gradient chained back through the
+          //  SAME symmetric A). q: world meters already rotated+offset by the caller's
+          //  per-plane constants. Returns (value, gradient wrt the ROTATED q-domain in
+          //  base-cell units) - same contract as the old rockSampleAniso.
+          vec3 rockSampleAniso(vec2 q, vec2 fallDir, float E) {
+              vec2 dir = fallDir / max(length(fallDir), 1e-4);
+              mat2 A = mat2(1.0) + (1.0 / E - 1.0) * outerProduct(dir, dir);
+              vec4 t = texture2D(u_rock_noise_tex, (A * q) / (u_rock_scale * ROCK_TEX_CELLS));
+              vec2 g = (t.gb * 2.0 - 1.0) * ROCK_GRAD_RANGE;
+              return vec3(t.r, A * g);
           }
-          float rockNoise(vec2 p) {
-              vec2 i = floor(p), f = fract(p);
-              vec2 u = f * f * (3.0 - 2.0 * f);
-              // Wrap the integer cell coordinate to a small, fixed range before hashing.
-              //  p is derived from v_world_position.xy (real Mercator-projected meters,
-              //  hundreds of thousands to low millions in magnitude), so i can be huge.
-              //  rockHash's sin()-based hash loses precision catastrophically at large
-              //  arguments (GPU sin() only reliably range-reduces over a bounded domain),
-              //  making the hash hypersensitive to tiny input changes at this scale - a
-              //  sub-pixel pan can shift the true (unwrapped) coordinate by a part-per-
-              //  million yet flip the hash's output entirely, producing visible flicker
-              //  exactly where this noise renders. 1000 keeps any single contiguous
-              //  bare_rock feature (a few km across even at Matterhorn scale) safely
-              //  within one period - no visible seam - while keeping the hash's own input
-              //  magnitude small and stable everywhere.
-              vec2 iw = mod(i, 1000.0);
-              float a = rockHash(iw);
-              float b = rockHash(iw + vec2(1.0, 0.0));
-              float c = rockHash(iw + vec2(0.0, 1.0));
-              float d = rockHash(iw + vec2(1.0, 1.0));
-              return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+          // [0,1] lichen-patch mask tap: one mask cell == 60 m (as before).
+          float rockNoise01(vec2 p) {
+              return texture2D(u_rock_noise_tex, p / ROCK_TEX_CELLS).a;
           }
-          // Value noise WITH ANALYTIC DERIVATIVES (iq's noised()): returns
-          //  (value, d/dp.x, d/dp.y), derivatives in cell units. Same sin-hash precision
-          //  wrap as rockNoise above; side effect accepted there too: the field repeats
-          //  every 997 cells per octave (>= ~19km apart for this shader's finest octave)
-          //  - a rare, faint seam line, far rarer than the aliasing it prevents.
-          vec3 rockNoised(vec2 p) {
-              vec2 i = floor(p), f = fract(p);
-              vec2 u = f * f * (3.0 - 2.0 * f);
-              vec2 du = 6.0 * f * (1.0 - f);   // derivative of the smoothstep blend
-              vec2 iw = mod(i, 997.0);
-              float a = rockHash(iw);
-              float b = rockHash(iw + vec2(1.0, 0.0));
-              float c = rockHash(iw + vec2(0.0, 1.0));
-              float d = rockHash(iw + vec2(1.0, 1.0));
-              float k1 = b - a, k2 = c - a, k3 = a - b - c + d;
-              return vec3(a + k1 * u.x + k2 * u.y + k3 * u.x * u.y,
-                          du * (vec2(k1, k2) + k3 * u.yx));
+          #ifdef ELEVATION_MOSAIC
+          // Bilinear (UNsnapped) elevation tap in mosaic UV. The exact-texel taps of
+          //  elevationTexelAt make every derived quantity (slope, curvature, triplanar weights,
+          //  fall line) constant per DEM texel - the square "pixel" mosaic seen on rock when
+          //  zoomed past DEM resolution. The mosaic is LINEAR-filtered and the terrarium decode
+          //  is linear, so interpolating the encoded channels is exact bilinear elevation.
+          float rockElevTap(vec2 muv) {
+              vec4 h = textureLod(u_rasters[ELEVATION_INDEX], muv, 0.0);
+          #ifdef ELEVATION_FLOAT_TEX
+              return h.r;
+          #else
+              return (h.r*256. + h.g + h.b/256.)*255. - 32768.;
+          #endif
           }
-          // Ridged multifractal (Musgrave, "Texturing & Modeling: A Procedural
-          //  Approach") with derivative propagation, per-octave screen-space fading, and
-          //  per-octave domain rotation. The defining step vs plain ridged-fBm: each
-          //  octave is weighted by the PREVIOUS octave's already-ridged value, producing
-          //  sharp weighted crest lines with quiet self-similar nested valleys - actual
-          //  "mountain silhouette" structure rather than uniform bumpiness (the round-5
-          //  finding; this is its proper form, evaluated ONCE with derivatives instead
-          //  of being abandoned for textures because of aliasing it no longer has).
-          //  p: domain coords in base-octave cells (caller folds world meters -> cells,
-          //  plus any anisotropy); pxPerBaseCell: screen pixels spanned by one base cell
-          //  along the domain's most-compressed axis (caller folds perspective footprint
-          //  AND anisotropy compression together - conservative fading is correct).
-          //  Returns (normalized ridge sum ~[0,1], gradient wrt p .xy). Caller maps the
-          //  gradient back through its own domain transform (see color block).
-          vec3 rockRidgedFbm(vec2 p, float pxPerBaseCell) {
-              const float LAC = 2.13;   // non-integer: octave lattices never re-align
-              // rotate+shrink the domain between octaves - breaks up the axis-aligned
-              // bias value-noise gradients otherwise show (iq's standard fbm practice).
-              // Precomputed transpose: GLSL ES 1.0 has no transpose().
-              const mat2 M2  = mat2(0.8, 0.6, -0.6, 0.8);
-              const mat2 M2T = mat2(0.8, -0.6, 0.6, 0.8);
-              const int OCTAVES = 5;
-              const float GAIN = 0.55;
-              const float WEIGHT_GAIN = 2.2;
-              float sum = 0.0, norm = 0.0, amp = 0.5, weight = 1.0;
-              float pxPerCell = pxPerBaseCell;
-              mat2 T = mat2(1.0);   // accumulated transposed domain map: dn/dp0 = T * gn
-              vec2 gradP0 = vec2(0.0);
-              for (int i = 0; i < OCTAVES; i++) {
-                  vec3 nd = rockNoised(p);
-                  // ridge fold into [0,1]; chain rule through |.| via sign()
-                  float n = 1.0 - abs(2.0 * nd.x - 1.0);
-                  vec2 g = -2.0 * sign(2.0 * nd.x - 1.0) * nd.yz;
-                  // Musgrave cascade (weight from THIS octave feeds the NEXT one)
-                  n *= weight;
-                  g *= weight;
-                  weight = clamp(n * WEIGHT_GAIN, 0.0, 1.0);
-                  // Per-octave screen-space fade: THE fix for rounds 1-5's aliasing.
-                  //  An octave whose wavelength approaches ~1-4 screen pixels fades to
-                  //  zero contribution instead of shimmering/moiring under minification
-                  //  - exactly what a hardware mip chain does for sampled textures.
-                  //  norm accumulates the same weights, so the result stays normalized
-                  //  (stable brightness AND stable relief strength) as octaves drop out
-                  //  while zooming - no popping at the fade boundaries either.
-                  float fade = smoothstep(1.0, 4.0, pxPerCell);
-                  sum += amp * fade * n;
-                  gradP0 += amp * fade * (T * g);
-                  norm += amp * fade;
-                  amp *= GAIN;
-                  pxPerCell /= LAC;
-                  T = T * M2T * LAC;
-                  p = M2 * p * LAC;
-              }
-              // guard the all-octaves-faded degenerate (impossible in practice: the
-              //  coarsest octave's wavelength >> any real pixel footprint)
-              if (norm > 0.0001) { sum /= norm; gradP0 /= norm; }
-              else { sum = 0.5; }
-              return vec3(sum, gradP0);
-          }
+          #endif
           #endif
         color: |
           {
@@ -942,14 +955,42 @@ styles:
                   vec2 st = currentRasterUV(ELEVATION_INDEX);
                   vec2 texwh = rasterPixelSize(ELEVATION_INDEX);
                   #ifdef ELEVATION_MOSAIC
-                  texwh = texwh / 3.0 + float(ELEVATION_TILE_OVERLAP);
+                  texwh = texwh / float(ELEVATION_MOSAIC_SPAN) + float(ELEVATION_TILE_OVERLAP);
                   #endif
                   vec2 duv = 1.0 / texwh;
-                  float hc = getElevationAt(st);
-                  float hn = getElevationAt(st + vec2(0.0, duv.y));
-                  float hs = getElevationAt(st - vec2(0.0, duv.y));
-                  float he = getElevationAt(st + vec2(duv.x, 0.0));
-                  float hw = getElevationAt(st - vec2(duv.x, 0.0));
+                  // ring radius (texels) of the coarse cavity/ledge scale; resolved below once the
+                  //  meters-per-texel is known, so it is declared here for both paths
+                  float ringR = 4.0;
+                  float hc, hn, hs, he, hw, hn4, hs4, he4, hw4;
+                  #ifdef ELEVATION_MOSAIC
+                  vec2 stp = 1.0 / rasterPixelSize(ELEVATION_INDEX);
+                  vec2 muv = elevationMosaicUV(st);
+                  {
+                      // meters per texel (same expression as dxy_elev.x below) -> ring radius that
+                      //  keeps the coarse scale near ~50 m regardless of DEM resolution
+                      float mpt = 2.0 * 3.141592 * 6378137.0 * exp2(-u_tile_origin.w) * duv.x / u_raster_offsets[ELEVATION_INDEX].z;
+                      ringR = clamp(50.0 / max(mpt, 0.01), 2.0, 8.0);
+                  }
+                  hc = rockElevTap(muv);
+                  hn = rockElevTap(muv + vec2(0., stp.y));
+                  hs = rockElevTap(muv - vec2(0., stp.y));
+                  he = rockElevTap(muv + vec2(stp.x, 0.));
+                  hw = rockElevTap(muv - vec2(stp.x, 0.));
+                  hn4 = rockElevTap(muv + vec2(0., stp.y) * ringR);
+                  hs4 = rockElevTap(muv - vec2(0., stp.y) * ringR);
+                  he4 = rockElevTap(muv + vec2(stp.x, 0.) * ringR);
+                  hw4 = rockElevTap(muv - vec2(stp.x, 0.) * ringR);
+                  #else
+                  hc = getElevationAt(st);
+                  hn = getElevationAt(st + vec2(0.0, duv.y));
+                  hs = getElevationAt(st - vec2(0.0, duv.y));
+                  he = getElevationAt(st + vec2(duv.x, 0.0));
+                  hw = getElevationAt(st - vec2(duv.x, 0.0));
+                  hn4 = getElevationAt(st + vec2(0.0, duv.y) * ringR);
+                  hs4 = getElevationAt(st - vec2(0.0, duv.y) * ringR);
+                  he4 = getElevationAt(st + vec2(duv.x, 0.0) * ringR);
+                  hw4 = getElevationAt(st - vec2(duv.x, 0.0) * ringR);
+                  #endif
                   vec2 dxy_elev = 2.0 * 3.141592 * 6378137.0 * exp2(-u_tile_origin.w) * duv / u_raster_offsets[ELEVATION_INDEX].z;
                   float unproj = exp(u_map_position.y / 6378137.0);
                   float coslat = 2.0 / (unproj + 1.0 / unproj);
@@ -968,47 +1009,97 @@ styles:
                   //  gradTrue itself (slope01/curv01) is untouched.
                   vec2 gradStable = gradTrue * min(1.0, 8.0 / max(slopeMag, 1e-5));
                   vec3 macroNormal = normalize(vec3(-gradStable, 1.0));
+                  // GEOMETRIC slope of the surface actually rasterized (screen-space derivatives of
+                  //  the world position, xy scaled to true meters). One DEM texel step becomes ONE
+                  //  near-vertical triangle whose every pixel shares the same DEM xy - so DEM-keyed
+                  //  terms smear down it as streaks (snow icicles). The drawn geometry knows it is a
+                  //  wall; trust the steeper of the two for every steep/ledge/snow decision.
+                  vec3 geoDx = dFdx(v_world_position.xyz), geoDy = dFdy(v_world_position.xyz);
+                  geoDx.xy *= coslat; geoDy.xy *= coslat;
+                  vec3 geoC = cross(geoDx, geoDy);
+                  float geoL = length(geoC);
+                  // guarded: a zero/degenerate derivative must give "flat", never NaN (NaN here
+                  //  poisoned every term it touched, including via 0 * NaN)
+                  vec3 geoN = (geoL > 1e-6 && geoL < 1e9) ? geoC * ((geoC.z < 0.0 ? -1.0 : 1.0) / geoL)
+                                                         : vec3(0.0, 0.0, 1.0);
+                  float geoSlope = sqrt(max(1.0 - geoN.z * geoN.z, 0.0)) / max(geoN.z, 0.02);
 
                   // --- ROUND 13: filtered derivative ridged multifractal --------------
-                  // Screen footprint (world meters per pixel) from fwidth on TILE-LOCAL
-                  //  coordinates: v_world_position.xy is ~5e6 m here, where one fp32 ulp
-                  //  is ~0.5 m - coarser than real per-pixel footprints at close zoom, so
-                  //  differencing world coords directly would quantize this to mush. The
-                  //  constant per-tile offset cancels mathematically (fwidth of x-c ==
-                  //  fwidth of x), but subtracting BEFORE differencing keeps the
-                  //  differentiated magnitudes small (tile extents <= ~48km, ulp ~4mm)
-                  //  so the subtraction itself stays exact.
-                  vec2 fwLocal = fwidth(v_world_position.xy - u_tile_origin.xy);
-                  float mpp = max(fwLocal.x, fwLocal.y);
-                  // Downhill anisotropy: stretch the pattern along the REAL fall line
-                  //  (gullies/runnels follow actual drainage - the round-1 insight, now
-                  //  on a field that can carry it). Gated by slope: downhill is
-                  //  meaningless and numerically noisy on flat ground. Elongation runs
-                  //  1 -> 2 as slope goes ~5deg -> ~31deg. Known risk, accepted for
-                  //  round 13 and trivially disabled (ROCK_ANISO = 0): the fall-line
-                  //  direction flips across ridgelines, creasing the field there - at
-                  //  this elongation that reads as spine structure, not a seam.
+                  // --- ROUND 14: seamless TRIPLANAR evaluation -------------------------
+                  // (Sebastian, after round 13: "pixels are stretched across very steep
+                  //  cliffs, rather than UV-mapped" / "rock is square pixels".) Round 13's
+                  //  domain was world-XY only: fragments stacked up a cliff wall share
+                  //  nearly the same (x,y), so the field smeared vertically down the face
+                  //  instead of following the surface, and the never-rotated first-octave
+                  //  value-noise lattice read as squares. Fix is classic triplanar: the
+                  //  SAME field evaluated in all three world planes (XY / XZ / ZY), blended
+                  //  by squared |macroNormal| components - weights are continuous and sum
+                  //  to 1, so there is no plane-switch seam anywhere. Each plane carries a
+                  //  distinct constant domain rotation (+offset): no lattice is ever
+                  //  axis-aligned (kills the square read) nor co-aligned with another
+                  //  plane's (no blend-boundary beating). Cost (round 16): 3 texture
+                  //  fetches of the baked field, full 5 octaves on every plane.
                   const float ROCK_ANISO = 1.0;
-                  float E = 1.0 + ROCK_ANISO * smoothstep(0.08, 0.6, slopeMag);
-                  vec2 fallDir = -gradStable / max(length(gradStable), 1e-4);
-                  // World->domain stretch, outer-product form (no trig): scales by 1/E
-                  //  along fallDir, leaves the perpendicular untouched. Symmetric by
-                  //  construction - the gradient chain back to world below relies on
-                  //  transpose(A) == A (GLSL ES 1.0 has no transpose()).
-                  mat2 A = mat2(1.0) + (1.0 / E - 1.0) * outerProduct(fallDir, fallDir);
-                  vec2 pDom = A * v_world_position.xy / u_rock_scale;
-                  // Pixels per base-octave cell along the compressed axis: anisotropy
-                  //  folds into the screen footprint conservatively (the compressed
-                  //  axis is the one that aliases first).
-                  vec3 rfbm = rockRidgedFbm(pDom, u_rock_scale / (mpp * E));
-                  float crest = rfbm.x;
-                  // Gradient wrt world meters: chain back through the domain map
-                  //  (d/dwp = transpose(A)/scale * d/dp; A symmetric). This is the bump
-                  //  normal's entire source - the SAME single evaluation that colored
-                  //  the pixel, which is the whole speed argument for analytic
-                  //  derivatives over finite-difference resampling (round 4's Voronoi
-                  //  bump needed 3 full cell searches for this).
-                  vec2 gradWorld = (A * rfbm.yz) / u_rock_scale;
+                  float cliffE = smoothstep(0.7, 1.6, max(slopeMag, min(geoSlope, 12.0)));
+                  float E = mix(1.0 + ROCK_ANISO * smoothstep(0.08, 0.6, slopeMag), u_rock_ledge_aniso, cliffE);
+                  // Shared 3D fall line (downhill tangent of the DEM surface). The old
+                  //  guard relied on E==1 making the aniso matrix identity, but NaN*0 is
+                  //  still NaN - flat ground needs a genuinely safe direction.
+                  vec3 fall3 = (slopeMag > 1e-4)
+                      ? normalize(vec3(-gradStable.x, -gradStable.y, -dot(gradStable, gradStable)))
+                      : vec3(1.0, 0.0, 0.0);
+                  // Plane rotations ~21deg / ~113deg / ~237deg with matching transposes
+                  //  (GLSL ES 1.0 has no transpose(); mat2 columns are (a,b),(c,d)).
+                  const mat2 RXY  = mat2( 0.9336, 0.3584, -0.3584,  0.9336);
+                  const mat2 RXYT = mat2( 0.9336, -0.3584, 0.3584,  0.9336);
+                  const mat2 RXZ  = mat2(-0.3907, 0.9205, -0.9205, -0.3907);
+                  const mat2 RXZT = mat2(-0.3907, -0.9205, 0.9205, -0.3907);
+                  const mat2 RZY  = mat2(-0.5446, -0.8387, 0.8387, -0.5446);
+                  const mat2 RZYT = mat2(-0.5446, 0.8387, -0.8387, -0.5446);
+                  // The projection planes must follow the surface actually DRAWN: where the DEM
+                  //  gradient reads gentle but the drawn triangle is a wall (node sub-sampling /
+                  //  filtering disagree there), the DEM normal picks the XY plane and the noise is
+                  //  projected straight down a vertical wall = vertical streaks.
+                  vec3 triN = normalize(mix(macroNormal, geoN, smoothstep(0.0, 0.6, geoSlope - slopeMag)));
+                  vec3 w3 = abs(triN);
+                  w3 *= w3;
+                  w3 /= (w3.x + w3.y + w3.z);
+                  vec3 rXY = rockSampleAniso(RXY * v_world_position.xy + vec2(37.7, 11.3),
+                                             RXY * fall3.xy, E);
+                  vec3 rXZ = rockSampleAniso(RXZ * v_world_position.xz + vec2(91.1, 47.3),
+                                             RXZ * fall3.xz, E);
+                  vec3 rZY = rockSampleAniso(RZY * v_world_position.zy + vec2(153.8, 77.9),
+                                             RZY * fall3.zy, E);
+                  float crest = w3.x * rXY.x + w3.y * rXZ.x + w3.z * rZY.x;
+                  // NEAR-VIEW DETAIL: the baked field bottoms out at ~25 m features, and magnified
+                  //  its ridged/domain-warped character reads as marble. Close up the rock needs
+                  //  granular, isotropic detail instead: 3 octaves of plain 3D value noise keyed
+                  //  to true-meter world position (5 m, 1.9 m, 0.8 m), each faded out as the pixel
+                  //  footprint approaches its wavelength (the analytic mip), so nothing is
+                  //  evaluated or visible at a distance.
+                  float footprint = max(length(geoDx), length(geoDy));   // meters per pixel
+                  float crestD = 0.5;
+                  if (footprint < 4.0) {
+                      vec3 pw = v_world_position.xyz;
+                      pw.xy *= coslat;
+                      float w0 = 1.0 - smoothstep(1.0, 3.0, footprint);
+                      float w1 = 1.0 - smoothstep(0.4, 1.2, footprint);
+                      float w2 = 1.0 - smoothstep(0.15, 0.5, footprint);
+                      crestD = 0.5 + 0.55 * w0 * (rockVNoise(pw / 5.0) - 0.5)
+                                   + 0.30 * w1 * (rockVNoise(pw / 1.9 + 7.1) - 0.5)
+                                   + 0.15 * w2 * (rockVNoise(pw / 0.8 + 3.3) - 0.5);
+                  }
+                  vec3 gradD = vec3(0.0);
+                  // Gradients wrt world meters: un-rotate each plane's gradient into its
+                  //  own two world axes, then reassemble the 3D gradient by component.
+                  //  This is the bump normal's entire source - same analytic-derivatives
+                  //  argument as round 13, now per plane.
+                  vec2 gXY = RXYT * rXY.yz;   // d/d(x,y)
+                  vec2 gXZ = RXZT * rXZ.yz;   // d/d(x,z)
+                  vec2 gZY = RZYT * rZY.yz;   // d/d(z,y)
+                  vec3 gradWorld = (w3.x * vec3(gXY.x, gXY.y, 0.0)
+                               +  w3.y * vec3(gXZ.x, 0.0, gXZ.y)
+                               +  w3.z * vec3(0.0, gZY.y, gZY.x)) / u_rock_scale;
 
                   // --- material/color blend -------------------------------------------
                   // Weathering keyed to the REAL DEM curvature (concave gully/crack
@@ -1016,13 +1107,21 @@ styles:
                   //  fractal field below (real rock gullies are BOTH geometrically
                   //  self-shadowed (lighting) AND materially different (damper/darker -
                   //  albedo), not the same signal twice).
-                  float weathered = clamp(u_rock_curv_strength * clamp(-curv01, 0.0, 1.0), 0.0, 1.0);
+                  float weathered = clamp(u_rock_curv_strength * clamp(-curv01, 0.0, 1.0), 0.0, 1.0)
+                                  * (1.0 - 0.7 * cliffE);   // DEM curvature is column-constant on walls
                   vec3 materialColor = mix(color.rgb, u_rock_shadow_color.rgb, weathered);
                   // Fractal structure in the albedo: crest lines read fresher/lighter,
                   // hollows darker. Same field the lighting below uses, so color and
                   // shading always agree about where the forms are - no albedo/lighting
-                  // mismatch to read as "pasted-on".
-                  materialColor *= 0.82 + 0.36 * crest;
+                  // mismatch to read as "pasted-on". Darkening rounds 2026-08-23: range was
+                  // [0.82, 1.18] -> [0.74, 1.18] -> [0.72, 1.18]; round 14's wider floor
+                  // also compensates the triplanar blend diluting crest variance (blending
+                  // three independent fields shrinks spread by ~sum w_i^2).
+                  // on walls the albedo field is calmed (cliff weight 0.7): at the contrast boost
+                  //  below it otherwise reads as camouflage blotches; structure there comes from the
+                  //  lighting, cavities and streaks instead
+                  materialColor *= mix(0.72 + 0.46 * crest, 0.88 + 0.24 * crest, 0.7 * cliffE);
+                  materialColor *= 0.82 + 0.36 * crestD;
 
                   // lichen/moss crust: common on exposed alpine rock worldwide regardless
                   //  of geology - a strong "this is real rock" cue no flat palette color
@@ -1038,7 +1137,21 @@ styles:
                   //  texture) and the smoothstep band widened considerably (soft blob
                   //  edges instead of a near-binary on/off threshold).
                   float lichenSite = (1.0 - slope01) * clamp(-curv01, 0.0, 1.0);
-                  float lichenPatch = smoothstep(0.15, 0.85, rockNoise(v_world_position.xy / 60.0 + 17.0));
+                  // PERF (2026-08-23): skip the lichen noise taps whenever the mask is
+                  //  already EXACTLY zero - strength 0 (slider off / arid presets) or a
+                  //  zero site factor (slope fully "ragged" at >= ~56deg, or convex
+                  //  ground). Steep faces are most bare-rock screen area, and
+                  //  mix(x,y,0)==x bit-for-bit: pure dead-work elimination. ROUND 14:
+                  //  the patch field is triplanar now too - an XY-only lichen mask
+                  //  streaks down cliffs exactly like the main field did.
+                  float lichenPatch = 0.0;
+                  if (u_rock_lichen_strength > 0.0 && lichenSite > 0.0) {
+                      float lichenN =
+                          w3.x * rockNoise01(RXY * v_world_position.xy / 60.0 + vec2(17.13, 3.71))
+                        + w3.y * rockNoise01(RXZ * v_world_position.xz / 60.0 + vec2(53.29, 91.7))
+                        + w3.z * rockNoise01(RZY * v_world_position.zy / 60.0 + vec2(127.4, 61.3));
+                      lichenPatch = smoothstep(0.15, 0.85, lichenN);
+                  }
                   float lichenMask = u_rock_lichen_strength * lichenSite * lichenPatch;
                   materialColor = mix(materialColor, u_rock_lichen_color.rgb, lichenMask);
 
@@ -1059,6 +1172,45 @@ styles:
                   //  retuning its alpha globally would affect every other land-cover type
                   //  too) - instead, pre-boost contrast here so more of it survives the
                   //  attenuation on the other side.
+                  // --- CLIFF READABILITY: normal-direction cavity, ledges, ribs -------------
+                  //  Depth of the center behind the mean of its ring, measured ALONG THE FACE
+                  //  NORMAL: for symmetric taps the g.d term cancels, leaving
+                  //  (mean(ring) - hc) / sqrt(1+|g|^2) - the slope-corrected curvature, in meters,
+                  //  then divided by the ring radius so it is a dimensionless "how deep is the
+                  //  groove for its width" (1 ~ 45 deg walls). >0 concave (crack, chimney,
+                  //  couloir), <0 convex (rib, arete, ledge lip). Two scales: 1 texel + ~50 m.
+                  float mpt1 = dxy_elev.x * coslat;
+                  float invN = inversesqrt(1.0 + slopeMag * slopeMag);
+                  float cn1 = (0.25 * (hn + hs + he + hw) - hc) * invN / mpt1;
+                  float cn4 = (0.25 * (hn4 + hs4 + he4 + hw4) - hc) * invN / (ringR * mpt1);
+                  // coarse-scale slope (the ring's own central difference) vs fine slope:
+                  //  a LEDGE is flatter locally than the steep wall around it
+                  float slopeC = length(vec2(he4 - hw4, hn4 - hs4)) / (2.0 * ringR * mpt1);
+                  float steep = u_rock_geo_mode > 0.5 ? max(slopeMag, min(geoSlope, 12.0)) : slopeMag;
+                  float cliff = smoothstep(0.7, 1.6, steep);
+                  float ledge = smoothstep(0.7, 1.2, slopeC)
+                              * (1.0 - smoothstep(0.45, 0.85, slopeMag / max(slopeC, 1e-3)))
+                              * (u_rock_geo_mode > 0.5 ? 1.0 - smoothstep(1.5, 2.5, geoSlope) : 1.0);
+                  float rib = smoothstep(0.02, 0.3, -cn4);
+                  float occ = clamp(0.65 * smoothstep(0.03, 0.35, cn4)
+                                  + 0.35 * smoothstep(0.05, 0.45, cn1), 0.0, 1.0);
+                  // On pixels whose DRAWN triangle is a wall, the DEM-derived terms (cavity, ledge,
+                  //  rib) are constant down a texel column - vertical thread - so they hand over to
+                  //  a WORLD-keyed cavity taken from the ridged field itself: its hollows (the
+                  //  veins between ridges) darken, smoothly and at low contrast. (A thresholded
+                  //  blob mask here read as leopard spots; nothing on a wall is thresholded now.)
+                  float geoW = smoothstep(1.2, 2.2, geoSlope);
+                  float occWorld = clamp(0.9 * (0.55 - crest), 0.0, 1.0);
+                  occ = mix(occ, occWorld, geoW);
+                  rib *= (1.0 - geoW);
+                  ledge *= (1.0 - geoW);
+                  // cavities darken everywhere on rock, more on faces (gentle-ground gullies
+                  //  already get the `weathered` albedo shift)
+                  materialColor *= 1.0 - u_rock_cavity_strength * occ * (0.5 + 0.5 * cliff);
+                  // light catching ledges and ribs: a brightening of albedo (NOT a specular term -
+                  //  a sheen on interpolated DEM faces reads as vacuum-formed plastic)
+                  materialColor *= 1.0 + u_rock_ledge_light * (0.6 * rib + 0.8 * ledge) * (0.4 + 0.6 * cliff);
+
                   materialColor = mix(vec3(dot(materialColor, vec3(0.3333))), materialColor, u_rock_contrast);
 
                   // u_rock_strength keeps its original semantics: 0 = flat original
@@ -1066,17 +1218,23 @@ styles:
                   //  lichen).
                   color.rgb = mix(color.rgb, materialColor, u_rock_strength * rockFade);
 
+
                   // --- bump-perturbed lighting ----------------------------------------
                   // A REAL surface normal perturbed by the fractal's own ANALYTIC
                   // gradient - zero extra noise evaluations - dotted against the shared
                   // screen-anchored sun. Relief scale: treat the fractal as a pseudo-
                   // heightfield ROCK_RELIEF*u_rock_scale meters tall; coupling relief to
                   // feature size keeps the look coherent across the scale slider.
-                  // Plain additive tilt on macroNormal (small-perturbation approximation,
-                  // same combine the rounds-6-12 normal map used).
-                  const float ROCK_RELIEF = 0.12;
-                  vec3 detailN = vec3(-gradWorld * (u_rock_scale * ROCK_RELIEF), 0.0);
-                  vec3 fullPerturbed = normalize(macroNormal + detailN);
+                  // ROUND 14: gradWorld is now the true 3D surface gradient, so the tilt
+                  // vector is tangential on ANY slope - round 13's vec3(-g,0) was only a
+                  // small-perturbation approximation valid near-horizontal (and cliffs
+                  // were exactly where it mattered). Same combine otherwise: plain
+                  // additive tilt on macroNormal. 0.12 -> 0.15: blending three planes'
+                  // gradients shrinks their variance (~sum w_i^2), the extra relief
+                  // restores the round-13 bump read.
+                  const float ROCK_RELIEF = 0.15;
+                  vec3 detailTilt = -(gradWorld + gradD * 0.5) * (u_rock_scale * ROCK_RELIEF * (1.0 + u_rock_cliff_relief * cliffE));
+                  vec3 fullPerturbed = normalize(macroNormal + detailTilt);
                   // mix (not a direct scale of the detail tilt by strength) so
                   //  u_rock_normal_strength = 0 is an EXACT no-op (perturbedNormal ==
                   //  macroNormal bit-for-bit), same invariant as every round before this.
@@ -1116,7 +1274,36 @@ styles:
                   //  come from dialing the (now much safer) slider up, not from a
                   //  structurally unsafe default.
                   float microLight = clamp(1.0 + (nDotLBump - nDotLMacro), 0.5, 2.0);
+                  // Snow dusting: seasonal snow line from latitude (~2800 m at 45 deg, ~1700 m at
+                  //  60 deg). Snow lies where the FINAL (detail-perturbed) surface is gentle: that
+                  //  is gentle ground AND the up-facing tops of ledges on a wall - the physical
+                  //  reason Berann's ledges read, and it follows the invented cliff relief too.
+                  //  Favors hollows and is broken up by the fractal so edges are ragged. Applied
+                  //  before the micro-light multiply so bump relief still models it.
+                  vec3 dbg = vec3(0.0);
+                  if (u_rock_snow_strength > 0.0 || u_rock_debug > 0.5) {
+                      float latDeg = degrees(atan(0.5 * (unproj - 1.0 / unproj)));
+                      float northSign = latDeg >= 0.0 ? 1.0 : -1.0;
+                      bool geo2 = u_rock_geo_mode > 1.5;
+                      float snowLine = 5000.0 - 55.0 * abs(latDeg)
+                                     - (geo2 ? 400.0 * geoN.y * northSign : 0.0);
+                      float gate = smoothstep(snowLine - 150.0, snowLine + 350.0, geo2 ? v_world_position.z : hc);
+                      float nzp = clamp(perturbedNormal.z, 0.0, 1.0);
+                      float tanP = sqrt(max(1.0 - nzp * nzp, 0.0)) / max(nzp, 0.05);
+                      // the DRAWN triangle's slope also vetoes snow (a ramp triangle that the DEM
+                      //  neighborhood calls "ledge top" is geometrically a wall - it must stay
+                      //  rock, so snow ends cleanly at the lip and resumes on the shelf below)
+                      float tanG = u_rock_geo_mode > 0.5 ? max(tanP, min(geoSlope, 12.0)) : tanP;
+                      float accum = max(1.0 - smoothstep(0.5, 1.3, tanG), 0.9 * ledge);
+                      accum *= 0.7 + 0.6 * clamp(cn4 * 4.0, 0.0, 1.0);
+                      float snowAmt = smoothstep(0.2, 0.8, clamp(accum * gate, 0.0, 1.0) + (crest - 0.5) * 0.8);
+                      snowAmt *= step(0.001, gate);
+                      color.rgb = mix(color.rgb, vec3(0.93, 0.95, 0.99), clamp(snowAmt * u_rock_snow_strength, 0.0, 1.0) * rockFade);
+                      dbg = vec3(gate, accum, snowAmt);
+                  }
+                  if (u_rock_debug > 1.5) { dbg = vec3(clamp(steep * 0.5, 0.0, 1.0), clamp(cn4 * 4.0 + 0.5, 0.0, 1.0), ledge); }
                   color.rgb *= mix(1.0, microLight, rockFade);
+                  if (u_rock_debug > 0.5) { color.rgb = dbg; }
               }
               #ifdef SHOW_CONTOURS
               // Land-cover-colored contours (Wanderkarte style): bare rock carries the
@@ -1206,13 +1393,13 @@ layers:
       draw: { polygons: { visible: true, color: global.color.beach } }
     ice:
       filter: [{ natural: glacier }]
-      draw: { polygons: { visible: true, color: global.color.ice } }
+      draw: { polygons: { visible: true, color: global.color.ice, style: unlit-polygons-alpine } }
     rock:
       filter: [{ natural: [bare_rock] }]
       draw: { polygons: { visible: true, color: global.color.rock, style: rock-texture } }
     scree:
       filter: [{ natural: [scree] }]
-      draw: { polygons: { visible: true, color: global.color.scree } }
+      draw: { polygons: { visible: true, color: global.color.scree, style: unlit-polygons-alpine } }
     farmland:
       filter:
         landuse:

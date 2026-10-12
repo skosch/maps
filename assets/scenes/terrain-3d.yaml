@@ -6,6 +6,13 @@ import:
 global:
     terrain_3d_mixin: terrain-3d
     terrain_3d_scale: 1.0
+    # clip-space depth bias factor pulling draped vector geometry toward the camera relative to the
+    #  terrain mesh (position block below: depth_shift = -factor * u_proj[2][3])
+    terrain_depth_shift: 0.08
+    # extra depth shift per unit of terrain slope (rise/run, capped at 4) on the terrain mesh: near-
+    #  vertical walls amplify any sub-meter xy/z disagreement between the terrain mesh and the
+    #  draped polygons into visible tan slivers, increasingly so the closer the camera is
+    terrain_depth_slope: 1.0
     elevation_sources: [elevation]
     fog_color: '#FFFFFF'
     #show_land_polygons: false  -- set in config updates
@@ -50,11 +57,14 @@ styles:
                 TANGRAM_VERTEX_RASTERS: true
                 TANGRAM_MIN_ELEVATION: 0.0
                 TANGRAM_TERRAIN_SCALE: global.terrain_3d_scale
+                # diagnostic knob (drape patches investigation): see the depth_shift line below
+                TERRAIN_DEPTH_SHIFT: global.terrain_depth_shift
+                TERRAIN_DEPTH_SLOPE: global.terrain_depth_slope
             blocks:
                 position: |
                     #ifdef TANGRAM_TERRAIN_3D
                     // use larger depth delta near camera to prevent terrain from covering geometry
-                    depth_shift = -0.02*u_proj[2][3];
+                    depth_shift = -float(TERRAIN_DEPTH_SHIFT)*u_proj[2][3];
                     #ifdef TANGRAM_RASTER_STYLE
                     // need sufficient offset for proxy levels to prevent terrain poking through level above
                     proxy *= 48.0;
@@ -62,7 +72,24 @@ styles:
                     #ifdef TANGRAM_RASTER_STYLE
                     // terrain-ground/hillshade mesh vertices ARE the terrain lattice nodes
                     //  (RasterStyle::build), so a single sample suffices and defines the surface
-                    float elev3d = max(getElevation(), TANGRAM_MIN_ELEVATION);
+                    float elev3d = max(latticeNodeElevation(currentRasterUV(ELEVATION_INDEX)), TANGRAM_MIN_ELEVATION);
+                    {
+                        // slope-aware shift (terrain_depth_slope): 2 one-sided taps at 1 texel
+                        vec2 sUv = currentRasterUV(ELEVATION_INDEX);
+                    #ifdef ELEVATION_MOSAIC
+                        vec2 sDuv = 1.0 / (rasterPixelSize(ELEVATION_INDEX) / float(ELEVATION_MOSAIC_SPAN) + float(ELEVATION_TILE_OVERLAP));
+                    #else
+                        vec2 sDuv = 1.0 / rasterPixelSize(ELEVATION_INDEX);
+                    #endif
+                        float sMpt = 2.0 * 3.141592 * 6378137.0 * exp2(-u_tile_origin.w) * sDuv.x
+                                     / u_raster_offsets[ELEVATION_INDEX].z;
+                        float sUn = exp(u_map_position.y / 6378137.0);
+                        float sCos = 2.0 / (sUn + 1.0 / sUn);
+                        float sH0 = getElevationAt(sUv);
+                        float sSlope = max(abs(getElevationAt(sUv + vec2(sDuv.x, 0.0)) - sH0),
+                                           abs(getElevationAt(sUv + vec2(0.0, sDuv.y)) - sH0)) / (sMpt * sCos);
+                        depth_shift *= 1.0 + float(TERRAIN_DEPTH_SLOPE) * clamp(sSlope, 0.0, 4.0);
+                    }
                     #else
                     // draped vector meshes must evaluate the terrain mesh's own piecewise-linear
                     //  surface, NOT resample the raster at their own vertices - see

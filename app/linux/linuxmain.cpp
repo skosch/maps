@@ -1032,7 +1032,13 @@ int main(int argc, char* argv[])
   //gladLoadGL();
   const char* glXexts = glXQueryExtensionsString(xDpy, DefaultScreen(xDpy));
   int dfltswap = strstr(glXexts, "GLX_EXT_swap_control_tear") ? -1 : 1;
-  glXSwapIntervalEXT(xDpy, xWin, MapsApp::cfg()["gl_swap_interval"].as<int>(dfltswap));
+  int swapInterval = MapsApp::cfg()["gl_swap_interval"].as<int>(dfltswap);
+  // Benchmarks must not be paced by the compositor: under XWayland/GNOME, swaps were observed
+  //  blocking ~970 ms each (1 Hz frame cadence) for whole runs, which confounds every GPU/CPU
+  //  comparison. ASCEND_SWAP_INTERVAL overrides; ASCEND_BENCH defaults it to 0.
+  if(const char* e = getenv("ASCEND_SWAP_INTERVAL")) { swapInterval = atoi(e); }
+  else if(const char* b = getenv("ASCEND_BENCH")) { if(atoi(b) != 0) { swapInterval = 0; } }
+  glXSwapIntervalEXT(xDpy, xWin, swapInterval);
 
   // setup input context for keyboard input
   XSetLocaleModifiers("");
@@ -1122,11 +1128,16 @@ int main(int argc, char* argv[])
   // main loop
   while(MapsApp::runApplication) {
 
-    do {
-      XEvent xevent = {};
-      XNextEvent(xDpy, &xevent);
-      processX11Event(&xevent);
-    } while(XPending(xDpy));
+    {
+      // zone: time the main loop spends blocked waiting for an X event (idle / lost wake-ups
+      //  show up here, see the 1 Hz frame-cadence investigation 2026-10-11)
+      PROFILE_SCOPE("XWaitEvent");
+      do {
+        XEvent xevent = {};
+        XNextEvent(xDpy, &xevent);
+        processX11Event(&xevent);
+      } while(XPending(xDpy));
+    }
 
     bool didDraw = app->drawFrame(xContext.width, xContext.height);
 
@@ -1137,7 +1148,10 @@ int main(int argc, char* argv[])
     }
 
     if(didDraw) {
-      glXSwapBuffers(xDpy, xWin);
+      {
+        PROFILE_SCOPE("SwapBuffers");
+        glXSwapBuffers(xDpy, xWin);
+      }
       if(Tangram::Profiler::isCapturing()) {
         // scenario counters so the summarizer can segment frames by view state
         Tangram::Profiler::counter("zoom", app->map->getZoom());
