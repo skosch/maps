@@ -663,6 +663,9 @@ function way_function(way)
     if amenity~="" then Attribute("amenity", amenity) end
     if tourism~="" then Attribute("tourism", tourism) end
     if natural=="wetland" then Attribute("wetland", Find("wetland")) end
+    -- glaciers carry their name on the polygon too, so the style can set it along the ice
+    -- (curved / line-broken / kept inside the glacier) instead of at the centroid point
+    if natural=="glacier" then SetNameAttributes(way) end
     landuse_poi = Find("name")~=""
   end
 
