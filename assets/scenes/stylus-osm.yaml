@@ -19,13 +19,28 @@ global:
   earth_order: 599 # should be above all other polygons
   #elevation_sources: []
   marker_font: IBM Plex Sans
-  # Open Sans looks very good, especially the italic style
+  # LABEL TYPOGRAPHY (docs/label-typography.md). One superfamily, IBM Plex Sans, used in two
+  #  widths: normal (primary_font / natural_font) for settlements, regions and area names,
+  #  and Condensed (condensed_font) wherever space is tight or the feature is thin and
+  #  vertical: peaks, roads, trails, hamlets. Hierarchy is carried by weight (300 light ->
+  #  600 semibold), case, tracking (font: letter_spacing, in em) and colour -- not by
+  #  switching families. Imhof's rules are followed where they survive the switch to one
+  #  family: upright for relief and settlements, italic ONLY for water and ice, tracked
+  #  capitals for things that are big and diffuse (ranges, regions, parks), tight sentence
+  #  case for things that are small and precise (peaks, hamlets).
   primary_font: IBM Plex Sans
-  # Imhof-style split: serif for natural/physical features (peaks, water, vegetation,
-  # landforms), sans (primary_font, above) for everything man-made (roads, buildings,
-  # settlements, admin boundaries). Water/waterway names additionally set style: italic
-  # at their own draw rules -- this var only carries the family.
-  natural_font: IBM Plex Serif
+  natural_font: IBM Plex Sans
+  condensed_font: IBM Plex Sans Condensed
+  # Glacier names: until the tile server writes `name` onto the glacier POLYGON (see
+  # scripts/tilemaker/process.lua), glaciers are labelled at their centroid point. After
+  # regenerating tiles, flip these two so glaciers get area labels inside their ice.
+  glacier_point_labels: false
+  glacier_polygon_labels: true
+  # Outline every area feature that gets (or should get) a name label, from the same tiles
+  #  the label planner sees. Tile-edge cuts show up as straight lines. Debug aid.
+  debug_area_outlines: false
+  # protected-area edge band: park-edge-fade (soft gradient) or park-edge-hatch (diagonal hatching)
+  park_edge_style: park-edge-fade
   bold_weight: 600 # use instead of "bold" to avoid checking for OS font if we only have semibold
 
   # docs/label-placement-plan.md Task 3 (revised 2026-07-15): peak label SALIENCE (does this
@@ -44,6 +59,15 @@ global:
   # exposed live via gui_variables (App menu > Map Variables) for exactly that reason.
   peak_candidacy_ele_floor: 500
 
+  # 2026-10-13: distance-aware peak density. A peak is labeled only while the radius within
+  # which it is the highest point (measured on the DEM; Label::Options::dominanceGate) is at
+  # least this fraction of its distance from the camera. Near you: nearly every named summit.
+  # Mid-distance: the ones that stand out from their surroundings. On the horizon: only the
+  # dominant massifs. Raise it for sparser labels, lower it for more.
+  peak_dominance_gate: 0.08
+  # Anonymous OSM elevation nodes (no name): not shown unless this is true.
+  peak_show_unnamed: false
+
   # HSL: 0 (== 360) is red, 120 is green, 240 is blue
   color:
     selected: red
@@ -52,6 +76,12 @@ global:
     landuse: honeydew
     parks: hsl(135, 33%, 81%) #'#bddec5'
     parks_border: hsl(135, 63%, 41%)
+    park_edge_line: hsl(135, 36%, 28%)
+    park_edge_band: hsl(135, 24%, 34%)
+    # same family as uniforms of the park-edge styles (land line, water band, water line); hex for shader
+    park_edge_line_u: '#2e613b'
+    park_edge_water_band_u: '#41739f'
+    park_edge_water_line_u: '#2a5a84'
     forest: hsl(135, 33%, 75%) # darker
     scrub: hsl(135, 33%, 87%) # lighter
     farmland: hsl(105, 33%, 81%) # decr hue -> more yellow
@@ -69,10 +99,24 @@ global:
     #   #1a3c5e - deep navy/slate, most subdued, closest to "ink" blue
     #   #2b4c7e - richer indigo-blue, good legibility/tradition balance (ACTIVE)
     #   #1f4e79 - classic saturated cartographic navy (USGS-topo-ish), most assertive
-    water_name: "#2b4c7e"
-    water_halo: "#e2eef0"
+    water_name: "#124d7d"
+    water_halo: "#e6f1f6"
     water_tunnel: hsl(205, 72%, 86%)
-    glacier_name: "#3A88BB"
+    glacier_name: "#174f80"
+    glacier_halo: "#f3f9fb"
+    # Terrain labels are warm umber, not neutral grey/black: the relief under them is warm
+    #  grey-beige rock, scree and bare earth (earth_color, rock, scree), and ink that shares
+    #  the hue of the ground it sits on reads as printed on the map, not floating over it.
+    #  Lightness steps carry the hierarchy: peak names darkest (the main thing to read),
+    #  elevations a step lighter, ranges and valleys lighter still and relying on size and
+    #  tracking to be seen.
+    peak_name: "#241b13"
+    peak_elevation: "#46372a"
+    peak_halo: white
+    range_name: "#5b4636"
+    range_halo: "#f3efe6"
+    valley_name: "#64563f"
+    valley_halo: "#f1ede2"
     spring: hsl(210, 100%, 45%)
     hot_spring: orange
     beach: "#FEEFC3" #[1.000,0.953,0.900]
@@ -133,14 +177,15 @@ global:
     city_point: white
     city_point_halo: black
     place_name: rgba(0, 0, 0, 0.8)
+    hamlet_name: rgba(40, 36, 32, 0.78)
     place_halo: white
     hood_name: rgba(136, 45, 23, 0.9)
     hood_halo: white
     bldg: [.83, .83, .83, 0.75]
     bldg_3d: [.83, .83, .83, 0.5]
     bldg_3d_line: [.65, .65, .63, 0.5]
-    park_name: darkgreen
-    park_halo: white
+    park_name: "#235029"
+    park_halo: "#f4f8f1"
     housenumber: [0.30, 0.30, 0.30] #"#d2b17d"
     housenumber_halo: [0.913, 0.925, 0.933] #rgba(38,38,38,0.15)
     landuse_name: [0.30, 0.30, 0.30]
@@ -293,6 +338,7 @@ global:
     forest: 11 # only one label for potentially large map feature, and only shown up to zoom 11 or 12
     special_culture: 11
     peak: 14
+    valley: 14.8
     saddle: 15
     cave: 16
     spring: 17
@@ -550,6 +596,48 @@ sources:
     #  via the resolution-retention GUI slider (MapsApp).
     zoom_retention: 4.0
 
+  # Same tile server and tiles as `osm` above, used only for the `peaks` layer. The server
+  #  emits mountain_peak from z11 only, but `osm` hands out coarser tiles as distance grows
+  #  (zoom_retention picks them by on-screen area), so the far half of a tilted view had no
+  #  peaks at all. Here max_zoom 11 + a large zoom_retention makes every visible tile (down to
+  #  ~16 px wide on screen) resolve to z11, regardless of distance. No `rasters`: label
+  #  elevations come from whichever DEM tile is already resident (see LabelManager), so far
+  #  vector tiles don't each pull their own z11 DEM tile. Own cache file - two MBTiles
+  #  writers on one file would collide.
+  osm-peaks:
+    type: MVT
+    url: http://tiles.styluslabs.com:8080/v1/{z}/{x}/{y}
+    headers: { "X-Hide-Encoding": "yes" }
+    cache: stylus-osm-peaks
+    attribution: |
+      © OpenStreetMap contributors
+    max_zoom: 11
+    min_data_zoom: 11   # see TileSource::ZoomOptions::minDataZoom: no distance-based coarsening
+    # decode only the poi layer: these are full tiles (every road/landcover/building), and
+    #  with one z11 tile per ~15 km out to the horizon the decode cost is the loading time.
+    #  Side effect: no anchor-occupancy grid for these tiles (it is built from water/road
+    #  layers), so peak labels no longer steer away from lakes/trails - only from ridges.
+    mvt_layers: [poi]
+    zoom_retention: 32.0
+
+  # Same tiles again, for AREA LABELS (lakes, glaciers, parks, reserves) and their debug
+  #  outlines. Capped at z11 so a feature is built from one tile fragment of ~13 km instead
+  #  of whatever 256 px tile happens to be loaded at the view zoom (docs/label-typography.md,
+  #  "Round 5"). Checked against the cached tiles: z11 still carries lakes down to ~25,000 m2,
+  #  glaciers, nature reserves and parks. Own cache file (two MBTiles writers on one file collide).
+  osm-areas:
+    type: MVT
+    url: http://tiles.styluslabs.com:8080/v1/{z}/{x}/{y}
+    headers: { "X-Hide-Encoding": "yes" }
+    cache: stylus-osm-areas
+    attribution: |
+      © OpenStreetMap contributors
+    max_zoom: 11
+    # without a DEM the outlines (and anything else draped) sit at sea level, under the terrain
+    rasters: global.elevation_sources
+    mvt_layers: [landuse, water, poi]
+    zoom_retention: 4.0
+
 fonts:
   Open Sans:
     - weight: 400
@@ -559,14 +647,47 @@ fonts:
       url: ../shared/fonts/OpenSans-Italic.ttf
     - weight: 600
       url: ../shared/fonts/OpenSans-SemiBold.ttf
+  # Label typography (docs/label-typography.md): one superfamily, two widths. Static
+  #  instances rather than the variable font - the text pipeline selects a font file by
+  #  (family, weight, style), so each weight/width we use is declared here. Bundled in
+  #  assets/fonts/plex (SIL OFL, see LICENSE-IBM-Plex.txt there).
   IBM Plex Sans:
+    - weight: 300
+      url: ../fonts/plex/IBMPlexSans-Light.otf
+    - weight: 300
+      style: italic
+      url: ../fonts/plex/IBMPlexSans-LightItalic.otf
     - weight: 400
-      url: /home/sebastian/.fonts/IBM-Plex-Sans/IBMPlexSans-Regular.otf
+      url: ../fonts/plex/IBMPlexSans-Regular.otf
     - weight: 400
       style: italic
-      url: /home/sebastian/.fonts/IBM-Plex-Sans/IBMPlexSans-Italic.otf
+      url: ../fonts/plex/IBMPlexSans-Italic.otf
+    - weight: 500
+      url: ../fonts/plex/IBMPlexSans-Medium.otf
+    - weight: 500
+      style: italic
+      url: ../fonts/plex/IBMPlexSans-MediumItalic.otf
     - weight: 600
-      url: /home/sebastian/.fonts/IBM-Plex-Sans/IBMPlexSans-SemiBold.otf
+      url: ../fonts/plex/IBMPlexSans-SemiBold.otf
+    - weight: 600
+      style: italic
+      url: ../fonts/plex/IBMPlexSans-SemiBoldItalic.otf
+    - weight: 700
+      url: ../fonts/plex/IBMPlexSans-Bold.otf
+  IBM Plex Sans Condensed:
+    - weight: 300
+      url: ../fonts/plex/IBMPlexSans_Condensed-Light.ttf
+    - weight: 400
+      url: ../fonts/plex/IBMPlexSans_Condensed-Regular.ttf
+    - weight: 400
+      style: italic
+      url: ../fonts/plex/IBMPlexSans_Condensed-Italic.ttf
+    - weight: 500
+      url: ../fonts/plex/IBMPlexSans_Condensed-Medium.ttf
+    - weight: 600
+      url: ../fonts/plex/IBMPlexSans_Condensed-SemiBold.ttf
+    - weight: 700
+      url: ../fonts/plex/IBMPlexSans_Condensed-Bold.ttf
   IBM Plex Serif:
     - weight: 400
       url: ../shared/fonts/IBMPlexSerif-Regular.otf
@@ -1364,6 +1485,66 @@ styles:
         color: |
           if (v_texcoord.x < 0.5) { discard; }
 
+  # Park / protected-area edge band (Builders::buildPolygonEdgeBand): a polygon rule with
+  #  `outline: width` makes the polygon builder emit a soft strip along the INSIDE of the edge,
+  #  every vertex draped on the terrain; v_texcoord.x = 0 on the boundary, 1 at the inner edge.
+  # Protected-area edge band. Geometry: Builders::buildPolygonEdgeBand, whose vertices sit on the
+  #  boundary and are pushed inward in polygon.vs (TANGRAM_EDGE_BAND) by EDGE_BAND_PX screen pixels.
+  #  Colour: the rule's colour inside, a darker solid line on the boundary itself, both switching to
+  #  blue where the boundary runs over water (a_normal.z < 0).
+  park-edge-base:
+    base: polygons
+    mix: global.terrain_3d_mixin
+    lighting: false
+    blend: inlay   # no depth write: overlapping bands / tile fragments must not occlude each other
+    texcoords: true
+    terrain_grid: 256
+    shaders:
+      defines:
+        TANGRAM_EDGE_BAND: true
+        EDGE_BAND_PX: 16.0
+      uniforms:
+        u_edge_line_land: global.color.park_edge_line_u
+        u_edge_band_water: global.color.park_edge_water_band_u
+        u_edge_line_water: global.color.park_edge_water_line_u
+      blocks:
+        global: |
+          varying float v_water;   // 1 where the boundary runs over water
+          varying float v_edge;    // boundary line thickness as a fraction of the band depth
+        position: |
+          #ifdef TANGRAM_TERRAIN_3D
+          depth_shift *= 3.0;   // an overlay on the ground: never lose the depth test to it
+          #endif
+          v_water = a_normal.z < 0.0 ? 1.0 : 0.0;
+          {
+              float lineUnits = clamp(0.8 + 0.1 * (u_map_position.z - 8.0), 0.8, 2.0) * u_meters_per_pixel / u_model[0][0];
+              v_edge = clamp(lineUnits / max(edgeBandExtent(), 1e-9), 0.0, 1.0);
+          }
+        color: |
+          // solid boundary line over a soft band; blue instead of green over water
+          vec3 band = mix(color.rgb, u_edge_band_water.rgb, v_water);
+          vec3 edge = mix(u_edge_line_land.rgb, u_edge_line_water.rgb, v_water);
+          float onLine = 1.0 - smoothstep(0.6 * v_edge, v_edge, v_texcoord.x);
+          color.rgb = mix(band, edge, onLine);
+          color.a = mix(color.a, 0.95, onLine);
+
+  park-edge-fade:
+    mix: park-edge-base
+    shaders:
+      blocks:
+        color: |
+          float f = 1.0 - v_texcoord.x;
+          color.a *= smoothstep(0.0, 1.0, f);
+
+  park-edge-hatch:
+    mix: park-edge-base
+    shaders:
+      blocks:
+        color: |
+          // 45 degree hatching in screen space, 2 px strokes every 6 px, fading inward
+          float h = mod(gl_FragCoord.x + gl_FragCoord.y, 6.0);
+          color.a *= (1.0 - 0.7 * v_texcoord.x) * smoothstep(0.0, 1.0, 2.5 - abs(h - 2.0) * 1.2);
+
 layers:
   landuse:
     data: { source: osm, layer: landuse }
@@ -1508,7 +1689,9 @@ layers:
     #enabled: global.show_polygons
     filter:
       - { boundary: national_park, $zoom: { min: 8 } }
-      - { protect_class: ["1", "1a", "1b", "2", "3", "5"], $zoom: { min: 10 } } #boundary: protected_area,
+      - { protect_class: ["1", "1a", "1b", "2", "3", "4", "5"], $zoom: { min: 10 } } #boundary: protected_area,
+      # unclassed nature reserves (ecological reserves etc.); working/utility classes excluded
+      - { leisure: nature_reserve, not: { protect_class: ["6", "7", "12", "14", "22", "97", "98"] }, $zoom: { min: 10 } }
       #- { leisure: nature_reserve, protect_class: ['1', '1a', '1b', '2', '3'], $zoom: { min: 10 } }
     selected:
       draw:
@@ -1519,22 +1702,19 @@ layers:
           color: global.color.selected
           width: 1.5px
     default:
-      enabled: false
-      filter:
-        name: true
-        any: [global.show_land_polygons, { $zoom: { max: 11 } }] # more succinct than all: [ {any: []}, {any: []} ]
+      # (This used to require global.show_land_polygons or tile zoom <= 11, which hid the
+      #  edge at every useful zoom on the 3D terrain scene, where land polygons are off.)
+      filter: { name: true }
       draw:
-        lines:
-          style: unlit-lines
-          order: global.order.border
-          color: global.color.parks_border
-          width: 1px
-        inner-lines:
-          style: inner-lines
+        # Cartographic park edge: a darker solid line on the true boundary plus a wide, soft,
+        #  semi-transparent green band on the INSIDE (fading out / hatched, see global.park_edge_style).
+        band:
+          style: global.park_edge_style
           order: global.order.border_inner
-          color: global.color.parks
-          alpha: 0.5
-          width: 8px
+          color: global.color.park_edge_band
+          alpha: 0.7
+          # 1.4 x the park name's letter size (11.5px); screen px at the zoom the tile was built at
+          outline: { width: 16px }
 
   # Phase 5 (docs/label-placement-plan.md): national-park / protected-area / forest labels,
   # drawn from the actual `landuse` polygon geometry so TextStyleBuilder can curve the
@@ -1555,9 +1735,11 @@ layers:
       any:
         - { boundary: national_park, $zoom: { min: 8 } }
         - {
-            protect_class: ["1", "1a", "1b", "2", "3", "5"],
+            protect_class: ["1", "1a", "1b", "2", "3", "4", "5"],
             $zoom: { min: 10 },
           }
+        - { leisure: nature_reserve, $zoom: { min: 10 } }
+        - { protect_class: ["6", "7", "12", "14", "22", "97", "98"], $zoom: { min: 10 } }
         - { landuse: [commercial, retail, winter_sports], $zoom: { min: 12 } }
         - {
             landuse: [industrial, military],
@@ -1572,31 +1754,63 @@ layers:
         transition: { show: { time: 0s }, hide: { time: 1s } }
         max_lines: 4
         priority: global.priority.forest
+        # Protected land: small tracked capitals in park green, stretched to fill the
+        #  area ("N A T I O N A L   P A R K" across the park, along its spine when it is
+        #  elongated). Medium weight - at 10-11px tracked caps in a light weight dissolve
+        #  into the land-cover tint behind them.
         font:
           family: global.natural_font
-          size: 12px
-          style: italic
+          weight: 500
+          size: [[8, 10.5px], [11, 11.5px], [13, 12.5px]]
+          transform: uppercase
+          # Area label (see docs/label-typography.md): the engine picks 1-3 lines or a line
+          #  along the spine, stretches tracking (min..max em) and line spacing to the room,
+          #  and drops the label when it does not fit INSIDE the park.
+          letter_spacing: 0.14
+          letter_spacing_fit: 0.85
+          letter_spacing_max: 1.8
           fill: global.color.park_name
-          stroke: { color: global.color.park_halo, width: 3 }
+          stroke: { color: global.color.park_halo, width: 3.8 }
     commercial:
       filter:
         - { landuse: [commercial, retail, industrial, military, winter_sports] }
         - { amenity: prison }
       draw:
-        {
-          text:
-            {
-              font:
-                {
-                  family: global.primary_font,
-                  fill: global.color.landuse_name,
-                  stroke: { color: global.color.default_halo },
-                },
-            },
-        }
+        text:
+          # Man-made land use: condensed grey, still tracked a little as an area name,
+          #  but visibly a different voice from the green natural-area names above.
+          font:
+            family: global.condensed_font
+            weight: 400
+            size: 10px
+            letter_spacing: 0.1
+            letter_spacing_fit: 0.0
+            fill: global.color.landuse_name
+            stroke: { color: global.color.default_halo, width: 2 }
+    # Working / utility protected land (watersheds, managed forest, historic sites): named, but
+    #  in the quiet grey voice of other land use rather than park green (and no green edge).
+    utility_protected:
+      filter: { protect_class: ["6", "7", "12", "14", "22", "97", "98"] }
+      draw:
+        text:
+          font:
+            family: global.condensed_font
+            weight: 400
+            size: 10px
+            letter_spacing: 0.1
+            letter_spacing_fit: 0.5
+            fill: global.color.landuse_name
+            stroke: { color: global.color.default_halo, width: 2 }
     national_park:
       filter: { boundary: national_park }
-      draw: { text: { priority: global.priority.national_park } }
+      draw:
+        text:
+          priority: global.priority.national_park
+          font:
+            weight: 600
+            size: [[7, 10.5px], [10, 12px], [13, 14px]]
+            letter_spacing: 0.2
+            letter_spacing_max: 2.0
     # glacier is deliberately absent here: process.lua never sets a name attribute on
     # the glacier *polygon* written to the landuse layer (only on the pois>landuse
     # centroid point), so this filter can never match a glacier feature -- see the
@@ -1609,6 +1823,64 @@ layers:
           { area: { min: 350000px2 }, $zoom: { min: 12 } },
         ]
       draw: { text: { visible: false } }
+
+  # Glacier names as AREA labels (off until the tile server puts `name` on glacier polygons,
+  # see global.glacier_polygon_labels): the engine breaks the name into lines / bends it along
+  # the ice, tracks it out, and drops it if it would spill off the glacier. Italic like water.
+  # Debug aid (global.debug_area_outlines): the polygons the area-label planner sees.
+  debug_outline_landuse:
+    enabled: global.debug_area_outlines
+    data: { source: osm-areas, layer: landuse }
+    filter:
+      $geometry: polygon
+      any:
+        - { natural: glacier }
+        - { name: true }
+    glacier:
+      filter: { natural: glacier }
+      draw: { lines: { style: unlit-lines, order: 900, color: "#00bcd4", width: 1.5px } }
+    named:
+      filter: { not: { natural: glacier } }
+      draw: { lines: { style: unlit-lines, order: 900, color: "#e91e63", width: 1.5px } }
+
+  debug_outline_water:
+    enabled: global.debug_area_outlines
+    data: { source: osm-areas, layer: water }
+    filter: { $geometry: polygon, name: true }
+    draw: { lines: { style: unlit-lines, order: 900, color: "#ff9800", width: 1.5px } }
+
+  landuse_glacier_name:
+    enabled: global.glacier_polygon_labels
+    data: { source: osm, layer: landuse }
+    exclusive: true
+    filter: { name: true, natural: glacier, area: { min: 9000px2 }, $zoom: { min: 10 } }
+    draw:
+      text:
+        interactive: true
+        # First of the "A / B" names; a compound "...gletscher" gets a soft hyphen (the "\n"),
+        #  used by the area label planner only if it has to break the name.
+        text_source: |
+          function() {
+              var n = (global.show_name_en && feature.name_en ? feature.name_en : feature.name) || "";
+              n = n.split(" / ")[0];
+              return n.replace(/([A-Za-zäöüÄÖÜß]{4,})(gletscher|ferner|kees|firn)$/i, "$1\n$2");
+          }
+        priority: global.priority.water
+        smooth: 30px
+        font:
+          family: global.natural_font
+          weight: 400
+          style: italic
+          size: |
+            function() {
+                var a = feature.area || 0;
+                return a > 5e7 ? 16 : a > 1e7 ? 14.5 : a > 2e6 ? 13 : 12;
+            }
+          letter_spacing: 0.1
+          letter_spacing_fit: 0.8
+          letter_spacing_max: 1.2
+          fill: global.color.glacier_name
+          stroke: { color: global.color.glacier_halo, width: 3.5 }
 
   landuse_misc:
     data: { source: osm, layer: landuse }
@@ -1660,26 +1932,68 @@ layers:
               [17, 3px],
               [18, 3m],
             ]
+    # Relief names that are *lines* in the tile data (natural=valley/gorge, mountain_range
+    #  spines; `area` is the square of the line's length): set along the feature, smoothed so
+    #  the type follows the large-scale shape of the ridge/valley and not its digitizing
+    #  noise, and tracked out so the name reads as extent, not as a point.
     valley:
-      # area is set to square of valley's length
       filter:
         {
           natural: [valley, gorge],
           name: true,
-          $zoom: { min: 12 },
-          area: { min: 50000px2 },
+          $zoom: { min: 9 },
+          area: { min: 40000px2 },
         }
       draw:
         text:
           text_source: global.names_one_line
           transition: { show: { time: 0s }, hide: { time: 1s } }
-          priority: global.priority.saddle
+          priority: global.priority.valley
+          repeat_distance: 420px
+          smooth: 36px
           font:
             family: global.natural_font
-            size: 9.5px
-            style: italic
-            fill: global.color.default_label
-            stroke: { color: global.color.default_halo, width: 3 }
+            weight: 400
+            size: [[9, 11px], [12, 12px], [14, 13px]]
+            letter_spacing: 0.22
+            fill: global.color.valley_name
+            stroke: { color: global.color.valley_halo, width: 3.5 }
+      gorge:
+        filter: { natural: gorge }
+        draw:
+          text:
+            font: { weight: 500, letter_spacing: 0.12 }
+    # Ranges: the biggest type on the physical map and the lightest touch. UPPERCASE,
+    #  Light weight at display size, tracked wide - the Imhof/Swisstopo "Gebirgsname".
+    #  Spine lines and (rarely) polygons both occur; polygons fall through to the polygon
+    #  spine path in TextStyleBuilder.
+    mountain_range:
+      filter:
+        {
+          natural: mountain_range,
+          name: true,
+          $zoom: { min: 7, max: 14 },
+        }
+      draw:
+        text:
+          text_source: global.names_one_line
+          transition: { show: { time: 0s }, hide: { time: 1s } }
+          # a range name outranks peaks while zoomed out, yields to them once the peaks
+          #  are the point of the view (function: priority has no zoom stops)
+          priority: |
+            function() { return $zoom < 11 ? 13.5 : 14.9; }
+          repeat_distance: 560px
+          smooth: 48px
+          font:
+            family: global.natural_font
+            weight: 300
+            size: [[7, 13px], [9, 16px], [11, 21px], [13, 26px]]
+            transform: uppercase
+            letter_spacing: 0.42
+            letter_spacing_fit: 0.75
+            letter_spacing_max: 0.9
+            fill: global.color.range_name
+            stroke: { color: global.color.range_halo, width: 3.5 }
 
   water:
     data: { source: osm, layer: water }
@@ -1722,15 +2036,33 @@ layers:
         text_source: global.names_one_line
         transition: { show: { time: 0s }, hide: { time: 1s } }
         priority: global.priority.water
+        smooth: 22px
         font:
           family: global.natural_font
-          fill: global.color.water_name
-          stroke: { color: global.color.water_halo, width: 2 }
+          weight: 400
           style: italic
-          size: [[16, 12px], [17, 14px]]
+          # Hydrography is the one place Imhof wants italic: the slant echoes flow. Water
+          #  names scale with the water body (a pond is not set like a lake): size by
+          #  area, and a lake name is tracked to span its water -- "L a c   L é m a n".
+          size: |
+            function() {
+                var a = feature.area || 0;
+                return a > 4e8 ? 19 : a > 4e7 ? 16 : a > 4e6 ? 14 : a > 4e5 ? 12.5 : 11.5;
+            }
+          letter_spacing: 0.06
+          letter_spacing_fit: 0.8
+          letter_spacing_max: 1.2
+          fill: global.color.water_name
+          stroke: { color: global.color.water_halo, width: 3 }
     oceans:
       filter: { water: ocean, $zoom: { min: 1, max: 8 } }
-      draw: { text: { font: { size: 14px } } }
+      draw:
+        text:
+          font:
+            size: 14px
+            weight: 300
+            letter_spacing: 0.5
+            letter_spacing_fit: 0.0
     intermittent:
       filter: { intermittent: true, $zoom: { max: 10 } }
       draw: { text: { visible: false } }
@@ -1775,12 +2107,21 @@ layers:
         text_source: global.names_one_line
         priority: global.priority.waterway
         #buffer: 3px
+        # Rivers meander and the data has a vertex every few metres: smooth the path so
+        #  the italic follows the river's course, not its jitter. Slight tracking keeps
+        #  small italic type from clotting on the curves.
+        smooth: 18px
+        # Beside the river, not across its banks: the label path is shifted up/left of the
+        #  reading direction by about half the cap height plus a gap.
+        path_offset: 8px
         font:
           family: global.natural_font
+          weight: 500
           fill: global.color.water_name
-          stroke: { color: global.color.water_halo, width: 2 }
+          stroke: { color: global.color.water_halo, width: 3 }
           style: italic
-          size: [[11, 0px], [12, 10px], [14, 11px], [16, 12px], [17, 14px]]
+          letter_spacing: 0.08
+          size: [[11, 0px], [12, 11.5px], [14, 12.5px], [16, 13.5px], [17, 15px]]
 
   transportation:
     data: { source: osm, layer: transportation }
@@ -2252,8 +2593,12 @@ layers:
       text:
         text_source: global.road_name_abbrev_fn
         transition: { show: { time: 0s }, hide: { time: 1s } }
+        # Street names run along curves and are read in motion: Condensed keeps a name
+        #  short enough to fit the segment, a hair of tracking keeps the small sizes open.
         font:
-          family: global.primary_font
+          family: global.condensed_font
+          weight: 400
+          letter_spacing: 0.03
           fill: global.color.road_name
           stroke: { color: global.color.road_halo, width: 4 }
           # 0px to hide by default
@@ -2270,6 +2615,7 @@ layers:
           priority: global.priority.motorway_name
           font:
             # shield is generally more important than name for motorway
+            weight: 500
             size: 12px
             stroke: { width: 4 }
 
@@ -2283,7 +2629,7 @@ layers:
           repeat_distance: 100px
           repeat_group: roads
           priority: global.priority.road_primary
-          font: { size: 14px }
+          font: { size: 14px, weight: 500 }
 
     secondary:
       exclusive: true
@@ -2293,7 +2639,7 @@ layers:
           repeat_distance: 100px
           repeat_group: roads
           priority: global.priority.road_secondary
-          font: { size: 13px }
+          font: { size: 13px, weight: 500 }
 
     tertiary:
       exclusive: true
@@ -2363,11 +2709,17 @@ layers:
         draw:
           text:
             text_wrap: 20
+            # Beside the dashed route line (never on it), strong enough to read on water.
+            # Screen-space offset (constant px at every zoom, unlike tile-space path_offset).
+            offset: [0px, -6px]
             font:
-              size: 10px
-              fill: global.color.ferry_name
-              stroke: { color: global.color.ferry_halo }
+              family: global.natural_font
+              size: 11.5px
+              weight: 500
+              fill: hsl(205, 52%, 44%)
+              stroke: { color: "#e6f1f6", width: 3.5 }
               style: italic
+              letter_spacing: 0.04
 
       piste:
         exclusive: true
@@ -2622,6 +2974,7 @@ layers:
           text_source: global.names_one_line
           font:
             family: global.primary_font
+            weight: 400
             size: 12px
             fill: global.color.default_label
             stroke: { color: global.color.default_halo, width: 3 }
@@ -2633,271 +2986,21 @@ layers:
         max_lines: 4
         font:
           family: global.primary_font
+          weight: 400
           size: 12px
           style: italic
           fill: global.color.default_label
           stroke: { color: global.color.default_halo, width: 3 }
 
+    # Peaks are drawn by the `peaks` layer (osm-peaks source) - consume them here so no
+    # other pois rule draws a second marker/label for the same feature.
     peak:
       exclusive: true
       filter:
         natural: [peak, volcano]
-        ele: { min: 1 }
-        all:
-          # docs/label-placement-plan.md Task 3 (revised after user feedback 2026-07-15:
-          # the original version of this comment described peak_prominence_ele_min as a
-          # "prominence proxy" gating candidacy -- that was wrong and is NOT what this does
-          # anymore; see the corrected explanation below).
-          #
-          # A peak below z12 becomes a label CANDIDATE if it has a real OSM prominence/
-          # wikipedia tag, OR is at or above global.peak_candidacy_ele_floor. That floor is
-          # NOT a prominence signal and must never be read as "taller = more likely to be
-          # labeled" -- it exists purely to bound how many candidates get built per tile for
-          # performance (every real peak on Earth would otherwise become a below-z12
-          # candidate, including countless unremarkable bumps with an OSM node), set low
-          # enough that it essentially never excludes a genuinely prominent peak (most named
-          # summits worldwide clear it) -- see the global's own comment for the full
-          # reasoning and why elevation can't be a real gate here at all.
-          #
-          # Actual salience selection happens entirely via PRIORITY + collision, below:
-          # peaks without a real prominence tag get a deliberately bad PROVISIONAL priority
-          # (worse than anything else on the map) so they display *nothing* until
-          # Label::refinePriority() confirms real texture-shading prominence, on the main
-          # thread, once the elevation mosaic loads -- see the priority: function below and
-          # its comment for the full mechanism. This is what actually answers "does this
-          # peak look spiky/salient from far away" -- not this filter.
-          - any:
-              # Block (dash-per-item) list, not a flow `[...]` sequence, so the JS
-              # function's literal `{`/`}` can't be mistaken for YAML flow-mapping
-              # syntax.
-              - { wikipedia: true }
-              - { prominence: true }
-              - function() { return feature.ele >= global.peak_candidacy_ele_floor; }
-              - { $zoom: { min: 12 } }
-          # REMOVED 2026-07-16 (real bug, found via user report "many peaks aren't showing
-          # at all unless super zoomed in, even with no other peaks around"): this used to
-          # be `all: [ any: [{$zoom:{min:17}}, global.show_trails], any: [{$zoom:{min:15}},
-          # {name:true}] ]` -- two SEPARATE any: blocks under `all:`, i.e. ANDed together,
-          # not the single OR the neighboring comment ("named peaks from z15, all from
-          # z17") actually described. Expanding the boolean algebra: (zoom>=17 OR
-          # show_trails) AND (zoom>=15 OR name) reduces to zoom>=17 OR (show_trails AND
-          # (zoom>=15 OR name)) -- with global.show_trails defaulting to false (see its own
-          # definition above), that's just "zoom>=17", full stop, for every peak on the
-          # default (non-Hike) map style, regardless of name/prominence/how empty the
-          # surrounding area is. Confirmed via headless screenshot: identical view, same
-          # peaks, same zoom -- 5+ named peaks with elevations under stylus-bike-hike
-          # (show_trails: true), zero peaks of any kind under the default stylus-osm-terrain
-          # source. This predates the current texture-shading candidacy/priority system
-          # above (it was a leftover simple zoom-tier heuristic from before that existed),
-          # and directly defeated this whole project's point: peaks are already gated by
-          # the OR-candidacy filter just above and by priority + collision (refined from
-          # real texture-shading prominence, see the priority: function below) -- that's
-          # the intended sole salience gate per this rule's own comment ("Actual salience
-          # selection happens entirely via PRIORITY + collision"), so a second, blunt,
-          # zoom>=17-in-practice gate on top of it was both redundant and the actual reason
-          # peaks were invisible at any normal browsing zoom.
       draw:
-        points:
-          sprite: peak
-          size: 14px
-          # docs/label-placement-plan.md Task 3, revised 2026-07-16 (real bug, user report:
-          # "a whole range doesn't show the label for the most prominent peak; it shows
-          # maybe just one for a small foothill, but nothing for the big peak until I
-          # really zoom in, with no other labels or trails interfering"): this used to be
-          # `repeat_distance: 40px`, shrunk down from the default full-tile-width radius but
-          # still a mutual-suppression radius applied by LabelCollider::process() at
-          # TILE-BUILD TIME (TileWorker thread), using only PROVISIONAL priority (name +
-          # weak height tie-break -- see priority: below) since the texture-shading-refined
-          # value doesn't exist yet at this point (main-thread only, later). Any nonzero
-          # repeat_distance risks exactly the reported symptom: two real, distinct nearby
-          # summits sharing a repeat group, with the provisional signal (which can't see
-          # true visual/texture-shading prominence) picking the WRONG one to permanently
-          # kill (Label::State::dead -- irreversible, not reconsidered once real refinement
-          # would have ranked them correctly) -- worse at low zoom, where real-world
-          # peak-to-peak spacing maps to fewer screen pixels, exactly matching "shows only
-          # once I zoom in a lot." Disabled entirely (0 = opts out, see
-          # TextStyleBuilder::applyRule's `if (repeatDistance > 0.f)` gate, same mechanism
-          # already used to opt text2/elevation out of this for the same class of reason --
-          # see its own comment). Deduplicating genuinely-coincident sprites (the same
-          # summit double-tagged in OSM) is left entirely to the real per-frame OBB
-          # collision pass (LabelManager::handleOcclusions()) instead, which runs AFTER
-          # texture-shading refinement and correctly favors the truly more prominent peak
-          # rather than guessing from a crude provisional signal.
-          repeat_distance: 0
-          # docs/label-placement-plan.md Phase 2/Task 3, revised 2026-07-16 after user
-          # report ("main peak with a label name isn't showing... but elevations are
-          # showing... in the same big font"): a NAMED peak must always outrank an unnamed/
-          # elevation-only one, full stop, regardless of texture-shading timing -- prior to
-          # this, both shared the exact same priority band (worst-in-tier 0.999 until
-          # texture-shading refinement), so an anonymous OSM elevation node could easily
-          # beat (or simply refine faster than) a genuinely famous named summit nearby.
-          #
-          # Two disjoint HALF-integer bands within the peak tier: named peaks get
-          # [global.priority.peak, +0.4], unnamed ones get [global.priority.peak+0.5, +0.9].
-          # Real OSM prominence (rare) or, failing that, a weak height-based tie-break (per
-          # user request -- "prioritize... based on prominence, height, and the fact that
-          # they have a name"; NOT a real prominence proxy on its own, see
-          # peak_candidacy_ele_floor's comment on why elevation can't stand in for
-          # prominence -- just a same-band nudge until texture shading provides the real
-          # signal) place each peak within its band via `badness` (0 = best, kMaxFraction =
-          # worst-in-band). kMaxFraction=0.4 leaves a comfortable margin below the 0.5 gap
-          # to the other band, so even a maximally-refined unnamed peak (see below) can
-          # never cross into named territory. Label::refinePriority() (main thread, once
-          # the elevation mosaic loads) replaces the fractional part with a texture-shading-
-          # derived one, but recovers the HALF-tier floor via floor(priority*2)/2, not
-          # floor(priority) -- see its own comment -- which is what actually preserves this
-          # named/unnamed separation through refinement instead of collapsing both bands
-          # back together. A peak that's never refined (e.g. no terrain data for this map
-          # style) simply stays at its band's provisional value, worst-in-band but still
-          # correctly ranked relative to the other band -- an acceptable, expected steady
-          # state, not a bug (mirrors Phase 2's original fallback contract).
-          priority: |
-            function() {
-                var name = global.show_name_en && feature.name_en ? feature.name_en : feature.name;
-                var base = name ? global.priority.peak : global.priority.peak + 0.5;
-                var kMaxFraction = 0.4;
-                var badness;
-                if (feature.prominence) {
-                    badness = 1 - Math.sqrt(Math.min(1, feature.prominence/3000));
-                } else {
-                    var eleFrac = Math.min(1, feature.ele/6000);
-                    badness = 1 - 0.3 * eleFrac;
-                }
-                return base + Math.round(badness * kMaxFraction * 65536)/65536;
-            }
-          priority_texture_shading: true
-          # docs/label-placement-plan.md Task 1, redesigned 2026-07-16 after user review:
-          # name (semibold) + elevation (regular) in two different font weights. Confirmed
-          # there is NO per-line/per-glyph-run font override anywhere in the text pipeline
-          # -- FontContext::layoutText shapes an entire label's text (including embedded
-          # "\n") with exactly one alfons::Font -- so a single combined "name\nele" string,
-          # as this used to be, can only ever render in one weight. Fixed by splitting into
-          # two separate TextLabels (see the "text2:" block below).
-          #
-          # The two labels are placed INDEPENDENTLY, each via its own Imhof/Yoeli-ranked +
-          # ridge/vector-avoidance anchor selection (TextStyleBuilder::salienceOrderedAnchors
-          # / Label::refineAnchor) -- real topo maps (and OSM) don't require a peak's name
-          # and elevation to be adjacent, so this scene doesn't force it either. No coupling
-          # between the two anymore (revised 2026-07-16, user report of inconsistent
-          # icon-to-elevation distance: an earlier "prefer stacking directly under the name"
-          # fallback, setStackFallbackTarget(), was removed -- see Label::refineAnchor()'s
-          # header comment in label.h for why): both labels always use the SAME
-          # icon-relative anchor formula (icon radius + own half-extent + anchor_gap_scale
-          # gap below), so they end up the same fixed distance from the icon regardless of
-          # which anchors they land on. A "name, elevation stacked right below" look can
-          # still happen when both independently pick vertically-adjacent anchors, but it's
-          # no longer a distinct mode with its own offset math.
-          #
-          # anchor_gap_scale below halves the default icon<->label gap (per feedback the
-          # default -- "clear of the icon's full dimension, halved already" -- still read
-          # as too far from the peak dot); the elevation label uses the SAME value (see its
-          # own font block below) so it sits exactly as close to the icon as the name does.
-          #
-          # optional: true here (revised 2026-07-16, user report: "peak dots shouldn't be
-          # shown unless at least an elevation number is shown... or an elevation AND a
-          # name"): the icon<->text "die together" cascade (LabelCollider::killOccludedLabels
-          # / LabelManager::handleOcclusions, both keyed on Label::Options::optional) used to
-          # run the other way -- THIS (the name) was the non-optional label, so a dot could
-          # end up on screen with only a bare elevation number, or even with nothing at all
-          # if the name failed to place while the (optional) elevation simply never got a
-          # chance to try. Marking the name optional and text2/elevation NOT optional (see
-          # its own block below) flips the gate to what's actually wanted: the icon requires
-          # a successfully-placed ELEVATION to show at all; the name is free extra context
-          # that can fail independently without hiding the dot+elevation.
-          text:
-            optional: true
-            anchor_gap_scale: 0.25
-            # Phase 7 round 13 (2026-07-17, docs/label-placement-v2-spec.md's "shared
-            # repeatGroup across every same-draw-rule peak" risk): unlike this rule's own
-            # icon (repeat_distance: 0, see the points: block's own comment) and text2/
-            # elevation (zeroed in PointStyleBuilder::addFeature(), pointStyleBuilder.cpp),
-            # the name label itself was never given the same treatment -- it was still
-            # defaulting to the ~256px repeatDistance and a repeatGroup shared by literally
-            # every peak using this rule (TextStyleBuilder::applyRule()'s fallback,
-            # `_rule.getParamSetHash()`, is over style parameters, not per-feature
-            # content). That means any two peaks' NAMES within 256 screen px of each other
-            # mutually excluded unconditionally, using only provisional pre-refinement
-            # priority at tile-build time (LabelCollider::filterRepeatGroups()) -- the exact
-            # same class of bug already fixed for the icon and elevation sub-label, just
-            # never applied to the label most likely to actually collide (it's the widest
-            # of the three). Disabled for the same reason round 5 disabled it for the icon:
-            # deduplicating genuinely-overlapping labels is left entirely to the real
-            # per-anchor OBB collision pass (LabelManager::handleOcclusions()), which runs
-            # AFTER texture-shading refinement and correctly favors the truly more prominent
-            # peak, instead of a crude provisional-priority guess.
-            text_repeat_distance: 0
-            text_source: |
-              function() {
-                  // Revised 2026-07-16 after user report: this used to fall back to
-                  // showing the elevation number here when there's no name -- but that
-                  // rendered it in THIS label's big/semibold 12px font, indistinguishable
-                  // from an actual peak name (reasonably read as "is this a bug, or did
-                  // someone tag a peak's elevation as its name in OSM?" -- neither: it was
-                  // this scene's own fallback). An elevation-only OSM node is not a named
-                  // summit and shouldn't look like one. Now: no name means no primary label
-                  // at all (PointStyleBuilder::addFeature independently builds text2 below
-                  // regardless of whether this one produced anything -- see its own
-                  // comment), so the elevation, when there's no name, shows ONLY via
-                  // text2's small/regular 9px font.
-                  var name = global.show_name_en && feature.name_en ? feature.name_en : feature.name;
-                  if(!name) { return ""; }
-                  if(name.slice(-9) == " Mountain") { name = name.slice(0, -9) + " Mt."; }
-                  else if(name.slice(0, 6) == "Mount ") { name = "Mt. " + name.slice(6); }
-                  return name;
-              }
-            text_wrap: 100
-            # docs/label-placement-plan.md Task 4: steer this label's anchor away from a
-            # strong ridge/canyon texture-shading response, main-thread only, once the
-            # elevation mosaic is available at this peak's position (Label::refineAnchor(),
-            # called from LabelManager::processLabelUpdate next to refinePriority() above) --
-            # mirrors that same "can't run at tile-build time on a TileWorker thread, so
-            # refine later on the main thread" pattern, this time for anchor choice instead
-            # of priority. This is the ridge-avoidance term Phase 3's anchorCandidateCost()
-            # (textStyleBuilder.cpp) left as a documented, permanent limitation for -- it
-            # turned out not to be permanent, just needing the same main-thread deferral
-            # Phase 2 already established for priority.
-            anchor_texture_shading: true
-            # Imhof: natural/physical features get serif, man-made get sans -- upright
-            # (not italic; italic is reserved for hydrography, see water_name/
-            # waterway_name) since only rivers/lakes get the slanted treatment here.
-            font:
-              family: global.natural_font
-              weight: 600
-              size: 11px
-          text2:
-            text_source: |
-              function() {
-                  // Elevation sub-label, always the small/regular font, regardless of
-                  // whether this peak has a name -- revised 2026-07-16: this used to skip
-                  // itself when there's no name (on the theory that the primary label above
-                  // already showed the elevation by itself in that case), but that meant an
-                  // unnamed elevation-only peak's number rendered in the PRIMARY label's
-                  // big/semibold font, indistinguishable from an actual peak name. The
-                  // primary above now returns "" when there's no name instead, so this is
-                  // unconditionally the only place elevation ever renders, in a font that
-                  // reads as "just a data point," not a summit name.
-                  //
-                  // Guard added 2026-07-17 (Phase 7 round 10 follow-up, "naked dot"
-                  // investigation): a peak can pass this rule's own candidacy filter via a
-                  // real `wikipedia`/`prominence` tag alone, with no `ele` tag at all -- for
-                  // such a feature `feature.ele` is undefined, and calling `.toFixed()` on
-                  // it used to throw (caught, but silently, one EvalFilterFn error log per
-                  // candidate, every frame). Return "" explicitly instead, matching the
-                  // primary label's own no-content pattern above -- PointStyleBuilder::
-                  // addFeature() (pointStyleBuilder.cpp) now kills the icon outright when
-                  // this label ends up with no content, so a naked dot can no longer result.
-                  if (feature.ele === undefined || feature.ele === null) { return ""; }
-                  const ele = global.metric_units ? feature.ele : feature.ele*3.2808399;
-                  return ele.toFixed(0);
-              }
-            # mono: reads as a plain data value, distinct from both the serif name above
-            # and the sans used for man-made labels -- not trying to be "natural" or
-            # "man-made" itself, just a number.
-            font:
-              family: IBM Plex Mono
-              weight: 400
-              size: 9px
-
+        points: { visible: false }
+        text: { visible: false }
     saddle:
       exclusive: true
       filter:
@@ -2979,21 +3082,44 @@ layers:
         filter: { boundary: national_park }
         draw: { text: { priority: global.priority.national_park } }
       glacier:
-        filter: { natural: glacier }
+        filter: { natural: glacier, area: { min: 9000px2 }, $zoom: { min: 10 } }
+        enabled: global.glacier_point_labels
         # Unlike national_park/protect_class/commercial etc., the OSM tile schema
         # (scripts/tilemaker/process.lua) never puts a name attribute on the glacier
         # *polygon* written to the landuse layer -- only on this pre-baked centroid
         # point. So glacier can't use the landuse_name polygon-curving path below (it
         # would just never match); this stays as the real (non-superseded) label source.
+        # Glacier names: ice-blue italic (water and ice share the italic), tracked wide,
+        #  sized by the ice's area so a valley glacier reads bigger than a cirque
+        #  glacier. This is a point at the polygon's label position; if the tile schema ever
+        #  carries the name on the glacier polygon too, the landuse_name rule picks it up
+        #  and sets it along the glacier's flow axis with no style change.
         draw:
           text:
             visible: true
             priority: global.priority.water
+            # First of the "A / B" names; compound German names broken at "-gletscher" with a
+            #  hyphen, never mid-word.
+            text_source: |
+              function() {
+                  var n = (global.show_name_en && feature.name_en ? feature.name_en : feature.name) || "";
+                  n = n.split(" / ")[0];
+                  return n.replace(/([A-Za-zäöüÄÖÜß]{4,})(gletscher|ferner|kees|firn)$/i, "$1-\n$2");
+              }
+            max_lines: 3
+            text_wrap: 16
             font:
               family: global.natural_font
-              size: 11px
-              fill: global.color.water_name
-              stroke: { color: global.color.water_halo, width: 3 }
+              weight: 400
+              style: italic
+              size: |
+                function() {
+                    var a = feature.area || 0;
+                    return a > 5e7 ? 16 : a > 1e7 ? 14.5 : a > 2e6 ? 13 : 12;
+                }
+              letter_spacing: 0.2
+              fill: global.color.glacier_name
+              stroke: { color: global.color.glacier_halo, width: 3.5 }
       # don't show label for huge area (where boundries may be offscreen) beyond z12
       hide:
         filter:
@@ -3046,6 +3172,7 @@ layers:
           text:
             font:
               family: global.natural_font
+              weight: 400
               size: 11px
               style: italic
               fill: global.color.spring
@@ -3101,9 +3228,13 @@ layers:
             visible: false
             color: global.poi_color.outdoor
             text:
+              # Icon above, name centred below it (not off to the side, where it spilled over
+              #  the neighbours). Upright medium in a dark green: italic is for water and ice.
+              anchor: bottom
+              text_wrap: 12
               font:
-                size: 13px
-                style: italic
+                size: 12px
+                weight: 500
                 fill: global.color.park_name
                 stroke: { color: global.color.park_halo, width: 3 }
         park:
@@ -3112,7 +3243,7 @@ layers:
             points:
               sprite: tree
               priority: global.priority.park
-              text: { font: { size: 14px } }
+              text: { font: { size: 12.5px } }
         golf:
           filter: { leisure: golf_course }
           draw: { points: { sprite: golf, priority: global.priority.golf } }
@@ -3120,18 +3251,10 @@ layers:
           filter: [{ amenity: grave_yard }, { landuse: cemetery }]
           draw:
             { points: { sprite: cemetery, priority: global.priority.cemetery } }
+        # Show icon + name only where they fit on the park itself: its area on screen must
+        #  clearly exceed the box of icon + (up to two-line) name, ~100 x 45 px.
         show:
-          filter:
-            - leisure: park
-              $zoom: { min: 14 }
-              any:
-                [
-                  { historic: true },
-                  { tourism: true },
-                  { area: { min: 1500px2 } },
-                ]
-            - $zoom: { min: 17 }
-            - area: { min: 2000px2 }
+          filter: { $zoom: { min: 14 }, area: { min: 2500px2 } }
           draw: { points: { visible: true } }
 
       natural:
@@ -3415,6 +3538,325 @@ layers:
               }
             draw: { points: { visible: false } }
 
+  # Mountain peaks: own layer + source (was a sublayer of `pois`). The standard `osm`
+  # source drops to coarse tiles with distance - and the tile server only emits
+  # mountain_peak from z11 - so under tilt everything past the first few km had no peak
+  # data at all. `osm-peaks` always resolves to z11 tiles where visible; density is then
+  # controlled by distance and dominance (dominance_gate below), not by tile LOD.
+  peaks:
+    data: { source: osm-peaks, layer: poi }
+    exclusive: true
+    filter:
+      natural: [peak, volcano]
+      ele: { min: 1 }
+      all:
+        # docs/label-placement-plan.md Task 3 (revised after user feedback 2026-07-15:
+        # the original version of this comment described peak_prominence_ele_min as a
+        # "prominence proxy" gating candidacy -- that was wrong and is NOT what this does
+        # anymore; see the corrected explanation below).
+        #
+        # A peak below z12 becomes a label CANDIDATE if it has a real OSM prominence/
+        # wikipedia tag, OR is at or above global.peak_candidacy_ele_floor. That floor is
+        # NOT a prominence signal and must never be read as "taller = more likely to be
+        # labeled" -- it exists purely to bound how many candidates get built per tile for
+        # performance (every real peak on Earth would otherwise become a below-z12
+        # candidate, including countless unremarkable bumps with an OSM node), set low
+        # enough that it essentially never excludes a genuinely prominent peak (most named
+        # summits worldwide clear it) -- see the global's own comment for the full
+        # reasoning and why elevation can't be a real gate here at all.
+        #
+        # Actual salience selection happens entirely via PRIORITY + collision, below:
+        # peaks without a real prominence tag get a deliberately bad PROVISIONAL priority
+        # (worse than anything else on the map) so they display *nothing* until
+        # Label::refinePriority() confirms real texture-shading prominence, on the main
+        # thread, once the elevation mosaic loads -- see the priority: function below and
+        # its comment for the full mechanism. This is what actually answers "does this
+        # peak look spiky/salient from far away" -- not this filter.
+        - any:
+            # Block (dash-per-item) list, not a flow `[...]` sequence, so the JS
+            # function's literal `{`/`}` can't be mistaken for YAML flow-mapping
+            # syntax.
+            - { wikipedia: true }
+            - { prominence: true }
+            - function() { return feature.ele >= global.peak_candidacy_ele_floor; }
+            - { $zoom: { min: 12 } }
+        # 2026-10-13 (user: "too many unnamed elevation points are shown, they're not
+        # really needed"): anonymous OSM elevation nodes are dropped unless
+        # global.peak_show_unnamed is set. (A peak with only a name_en counts as named.)
+        - any:
+            - { name: true }
+            - { name_en: true }
+            - function() { return global.peak_show_unnamed; }
+        # REMOVED 2026-07-16 (real bug, found via user report "many peaks aren't showing
+        # at all unless super zoomed in, even with no other peaks around"): this used to
+        # be `all: [ any: [{$zoom:{min:17}}, global.show_trails], any: [{$zoom:{min:15}},
+        # {name:true}] ]` -- two SEPARATE any: blocks under `all:`, i.e. ANDed together,
+        # not the single OR the neighboring comment ("named peaks from z15, all from
+        # z17") actually described. Expanding the boolean algebra: (zoom>=17 OR
+        # show_trails) AND (zoom>=15 OR name) reduces to zoom>=17 OR (show_trails AND
+        # (zoom>=15 OR name)) -- with global.show_trails defaulting to false (see its own
+        # definition above), that's just "zoom>=17", full stop, for every peak on the
+        # default (non-Hike) map style, regardless of name/prominence/how empty the
+        # surrounding area is. Confirmed via headless screenshot: identical view, same
+        # peaks, same zoom -- 5+ named peaks with elevations under stylus-bike-hike
+        # (show_trails: true), zero peaks of any kind under the default stylus-osm-terrain
+        # source. This predates the current texture-shading candidacy/priority system
+        # above (it was a leftover simple zoom-tier heuristic from before that existed),
+        # and directly defeated this whole project's point: peaks are already gated by
+        # the OR-candidacy filter just above and by priority + collision (refined from
+        # real texture-shading prominence, see the priority: function below) -- that's
+        # the intended sole salience gate per this rule's own comment ("Actual salience
+        # selection happens entirely via PRIORITY + collision"), so a second, blunt,
+        # zoom>=17-in-practice gate on top of it was both redundant and the actual reason
+        # peaks were invisible at any normal browsing zoom.
+    draw:
+      points:
+        sprite: peak
+        size: 14px
+        # Formerly inherited from the `pois` layer this rule used to be a sublayer of (it is
+        # its own layer now, fed by the `osm-peaks` source - see sources: and the stub
+        # `peak:` rule left in `pois`).
+        texture: pois
+        interactive: true
+        collide: true
+        transition: { show: { time: 0s }, hide: { time: 1s } }
+        # Distance-aware density (Label::Options::dominanceGate): label a peak only while its
+        # DEM dominance radius is at least this fraction of its distance from the camera.
+        # Needs dominance >= ratio * d * d / (d + 10 km): ~8% of the distance far away,
+        # much less up close - a 130 m knoll at 5 km, a 1 km-dominant summit out to 19 km,
+        # only a ~4 km massif at 60 km.
+        dominance_gate: global.peak_dominance_gate
+        # docs/label-placement-plan.md Task 3, revised 2026-07-16 (real bug, user report:
+        # "a whole range doesn't show the label for the most prominent peak; it shows
+        # maybe just one for a small foothill, but nothing for the big peak until I
+        # really zoom in, with no other labels or trails interfering"): this used to be
+        # `repeat_distance: 40px`, shrunk down from the default full-tile-width radius but
+        # still a mutual-suppression radius applied by LabelCollider::process() at
+        # TILE-BUILD TIME (TileWorker thread), using only PROVISIONAL priority (name +
+        # weak height tie-break -- see priority: below) since the texture-shading-refined
+        # value doesn't exist yet at this point (main-thread only, later). Any nonzero
+        # repeat_distance risks exactly the reported symptom: two real, distinct nearby
+        # summits sharing a repeat group, with the provisional signal (which can't see
+        # true visual/texture-shading prominence) picking the WRONG one to permanently
+        # kill (Label::State::dead -- irreversible, not reconsidered once real refinement
+        # would have ranked them correctly) -- worse at low zoom, where real-world
+        # peak-to-peak spacing maps to fewer screen pixels, exactly matching "shows only
+        # once I zoom in a lot." Disabled entirely (0 = opts out, see
+        # TextStyleBuilder::applyRule's `if (repeatDistance > 0.f)` gate, same mechanism
+        # already used to opt text2/elevation out of this for the same class of reason --
+        # see its own comment). Deduplicating genuinely-coincident sprites (the same
+        # summit double-tagged in OSM) is left entirely to the real per-frame OBB
+        # collision pass (LabelManager::handleOcclusions()) instead, which runs AFTER
+        # texture-shading refinement and correctly favors the truly more prominent peak
+        # rather than guessing from a crude provisional signal.
+        repeat_distance: 0
+        # docs/label-placement-plan.md Phase 2/Task 3, revised 2026-07-16 after user
+        # report ("main peak with a label name isn't showing... but elevations are
+        # showing... in the same big font"): a NAMED peak must always outrank an unnamed/
+        # elevation-only one, full stop, regardless of texture-shading timing -- prior to
+        # this, both shared the exact same priority band (worst-in-tier 0.999 until
+        # texture-shading refinement), so an anonymous OSM elevation node could easily
+        # beat (or simply refine faster than) a genuinely famous named summit nearby.
+        #
+        # Two disjoint HALF-integer bands within the peak tier: named peaks get
+        # [global.priority.peak, +0.4], unnamed ones get [global.priority.peak+0.5, +0.9].
+        # Real OSM prominence (rare) or, failing that, a weak height-based tie-break (per
+        # user request -- "prioritize... based on prominence, height, and the fact that
+        # they have a name"; NOT a real prominence proxy on its own, see
+        # peak_candidacy_ele_floor's comment on why elevation can't stand in for
+        # prominence -- just a same-band nudge until texture shading provides the real
+        # signal) place each peak within its band via `badness` (0 = best, kMaxFraction =
+        # worst-in-band). kMaxFraction=0.4 leaves a comfortable margin below the 0.5 gap
+        # to the other band, so even a maximally-refined unnamed peak (see below) can
+        # never cross into named territory. Label::refinePriority() (main thread, once
+        # the elevation mosaic loads) replaces the fractional part with a texture-shading-
+        # derived one, but recovers the HALF-tier floor via floor(priority*2)/2, not
+        # floor(priority) -- see its own comment -- which is what actually preserves this
+        # named/unnamed separation through refinement instead of collapsing both bands
+        # back together. A peak that's never refined (e.g. no terrain data for this map
+        # style) simply stays at its band's provisional value, worst-in-band but still
+        # correctly ranked relative to the other band -- an acceptable, expected steady
+        # state, not a bug (mirrors Phase 2's original fallback contract).
+        priority: |
+          function() {
+              var name = global.show_name_en && feature.name_en ? feature.name_en : feature.name;
+              var base = name ? global.priority.peak : global.priority.peak + 0.5;
+              var kMaxFraction = 0.4;
+              var badness;
+              if (feature.prominence) {
+                  badness = 1 - Math.sqrt(Math.min(1, feature.prominence/3000));
+              } else {
+                  var eleFrac = Math.min(1, feature.ele/6000);
+                  badness = 1 - 0.3 * eleFrac;
+              }
+              return base + Math.round(badness * kMaxFraction * 65536)/65536;
+          }
+        priority_texture_shading: true
+        # docs/label-placement-plan.md Task 1, redesigned 2026-07-16 after user review:
+        # name (semibold) + elevation (regular) in two different font weights. Confirmed
+        # there is NO per-line/per-glyph-run font override anywhere in the text pipeline
+        # -- FontContext::layoutText shapes an entire label's text (including embedded
+        # "\n") with exactly one alfons::Font -- so a single combined "name\nele" string,
+        # as this used to be, can only ever render in one weight. Fixed by splitting into
+        # two separate TextLabels (see the "text2:" block below).
+        #
+        # The two labels are placed INDEPENDENTLY, each via its own Imhof/Yoeli-ranked +
+        # ridge/vector-avoidance anchor selection (TextStyleBuilder::salienceOrderedAnchors
+        # / Label::refineAnchor) -- real topo maps (and OSM) don't require a peak's name
+        # and elevation to be adjacent, so this scene doesn't force it either. No coupling
+        # between the two anymore (revised 2026-07-16, user report of inconsistent
+        # icon-to-elevation distance: an earlier "prefer stacking directly under the name"
+        # fallback, setStackFallbackTarget(), was removed -- see Label::refineAnchor()'s
+        # header comment in label.h for why): both labels always use the SAME
+        # icon-relative anchor formula (icon radius + own half-extent + anchor_gap_scale
+        # gap below), so they end up the same fixed distance from the icon regardless of
+        # which anchors they land on. A "name, elevation stacked right below" look can
+        # still happen when both independently pick vertically-adjacent anchors, but it's
+        # no longer a distinct mode with its own offset math.
+        #
+        # anchor_gap_scale below halves the default icon<->label gap (per feedback the
+        # default -- "clear of the icon's full dimension, halved already" -- still read
+        # as too far from the peak dot); the elevation label uses the SAME value (see its
+        # own font block below) so it sits exactly as close to the icon as the name does.
+        #
+        # optional: true here (revised 2026-07-16, user report: "peak dots shouldn't be
+        # shown unless at least an elevation number is shown... or an elevation AND a
+        # name"): the icon<->text "die together" cascade (LabelCollider::killOccludedLabels
+        # / LabelManager::handleOcclusions, both keyed on Label::Options::optional) used to
+        # run the other way -- THIS (the name) was the non-optional label, so a dot could
+        # end up on screen with only a bare elevation number, or even with nothing at all
+        # if the name failed to place while the (optional) elevation simply never got a
+        # chance to try. Marking the name optional and text2/elevation NOT optional (see
+        # its own block below) flips the gate to what's actually wanted: the icon requires
+        # a successfully-placed ELEVATION to show at all; the name is free extra context
+        # that can fail independently without hiding the dot+elevation.
+        text:
+          optional: true
+          # 2026-10-13 (user: peak name and elevation "too far from their dot markers, should
+          # be at half of their current distance"). Two knobs, and 0 for the gap alone is
+          # NOT possible: a name above and an elevation below the dot are separated only by
+          # this gap (each label box ends at the dot centre +- gap*14px/2), so at 0 the two
+          # boxes touch, count as colliding, and the name always loses (seen live: nearly
+          # every name gone). So the label box buffer (default 0.25*font size on every side,
+          # which is most of the visible gap) is zeroed instead and the gap kept slightly
+          # positive: 0.15 -> boxes 2.1px apart. Elevation inherits both from this block.
+          anchor_gap_scale: 0.15
+          buffer: 0px
+          # Phase 7 round 13 (2026-07-17, docs/label-placement-v2-spec.md's "shared
+          # repeatGroup across every same-draw-rule peak" risk): unlike this rule's own
+          # icon (repeat_distance: 0, see the points: block's own comment) and text2/
+          # elevation (zeroed in PointStyleBuilder::addFeature(), pointStyleBuilder.cpp),
+          # the name label itself was never given the same treatment -- it was still
+          # defaulting to the ~256px repeatDistance and a repeatGroup shared by literally
+          # every peak using this rule (TextStyleBuilder::applyRule()'s fallback,
+          # `_rule.getParamSetHash()`, is over style parameters, not per-feature
+          # content). That means any two peaks' NAMES within 256 screen px of each other
+          # mutually excluded unconditionally, using only provisional pre-refinement
+          # priority at tile-build time (LabelCollider::filterRepeatGroups()) -- the exact
+          # same class of bug already fixed for the icon and elevation sub-label, just
+          # never applied to the label most likely to actually collide (it's the widest
+          # of the three). Disabled for the same reason round 5 disabled it for the icon:
+          # deduplicating genuinely-overlapping labels is left entirely to the real
+          # per-anchor OBB collision pass (LabelManager::handleOcclusions()), which runs
+          # AFTER texture-shading refinement and correctly favors the truly more prominent
+          # peak, instead of a crude provisional-priority guess.
+          text_repeat_distance: 0
+          text_source: |
+            function() {
+                // Revised 2026-07-16 after user report: this used to fall back to
+                // showing the elevation number here when there's no name -- but that
+                // rendered it in THIS label's big/semibold 12px font, indistinguishable
+                // from an actual peak name (reasonably read as "is this a bug, or did
+                // someone tag a peak's elevation as its name in OSM?" -- neither: it was
+                // this scene's own fallback). An elevation-only OSM node is not a named
+                // summit and shouldn't look like one. Now: no name means no primary label
+                // at all (PointStyleBuilder::addFeature independently builds text2 below
+                // regardless of whether this one produced anything -- see its own
+                // comment), so the elevation, when there's no name, shows ONLY via
+                // text2's small/regular 9px font.
+                var name = global.show_name_en && feature.name_en ? feature.name_en : feature.name;
+                if(!name) { return ""; }
+                if(name.slice(-9) == " Mountain") { name = name.slice(0, -9) + " Mt."; }
+                else if(name.slice(0, 6) == "Mount ") { name = "Mt. " + name.slice(6); }
+                return name;
+            }
+          text_wrap: 100
+          # docs/label-placement-plan.md Task 4: steer this label's anchor away from a
+          # strong ridge/canyon texture-shading response, main-thread only, once the
+          # elevation mosaic is available at this peak's position (Label::refineAnchor(),
+          # called from LabelManager::processLabelUpdate next to refinePriority() above) --
+          # mirrors that same "can't run at tile-build time on a TileWorker thread, so
+          # refine later on the main thread" pattern, this time for anchor choice instead
+          # of priority. This is the ridge-avoidance term Phase 3's anchorCandidateCost()
+          # (textStyleBuilder.cpp) left as a documented, permanent limitation for -- it
+          # turned out not to be permanent, just needing the same main-thread deferral
+          # Phase 2 already established for priority.
+          anchor_texture_shading: true
+          # Peak names (docs/label-typography.md): IBM Plex Sans CONDENSED, upright, sentence
+          # case, barely tracked. Condensed because a summit label sits on an icon in the
+          # most crowded part of the map and is read at a glance -- narrow letterforms keep
+          # the box (and so the collision footprint) small. Upright because italic is
+          # reserved for water and ice. The *hierarchy among peaks* is typographic, like a
+          # printed topo: weight and size step up with the REAL OSM prominence tag
+          # (prominence >= 900 m: semibold 13px; >= 350 m or a Wikipedia entry: medium
+          # 11.5px; the rest: regular 10.5px). Prominence is the only signal used - elevation
+          # alone never makes a label heavier, same rule as for label selection (see the
+          # priority: function above).
+          font:
+            family: global.condensed_font
+            weight: |
+              function() {
+                  var pr = feature.prominence || 0;
+                  return pr >= 900 ? "700" : "600";
+              }
+            size: |
+              function() {
+                  var pr = feature.prominence || 0;
+                  return pr >= 900 ? 15 : (pr >= 350 || feature.wikipedia) ? 13.5 : 12.5;
+              }
+            letter_spacing: 0.03
+            fill: global.color.peak_name
+            # 1.5px, down from the inherited 3px: with the background-adaptive halo (sdf.fs,
+            # TextStyle::onBeginDrawFrame) now confined to near-black backgrounds this is a
+            # light touch, not the old white smear on dim terrain.
+            stroke: { color: global.color.peak_halo, width: 3.2 }
+        text2:
+          text_source: |
+            function() {
+                // Elevation sub-label, always the small/regular font, regardless of
+                // whether this peak has a name -- revised 2026-07-16: this used to skip
+                // itself when there's no name (on the theory that the primary label above
+                // already showed the elevation by itself in that case), but that meant an
+                // unnamed elevation-only peak's number rendered in the PRIMARY label's
+                // big/semibold font, indistinguishable from an actual peak name. The
+                // primary above now returns "" when there's no name instead, so this is
+                // unconditionally the only place elevation ever renders, in a font that
+                // reads as "just a data point," not a summit name.
+                //
+                // Guard added 2026-07-17 (Phase 7 round 10 follow-up, "naked dot"
+                // investigation): a peak can pass this rule's own candidacy filter via a
+                // real `wikipedia`/`prominence` tag alone, with no `ele` tag at all -- for
+                // such a feature `feature.ele` is undefined, and calling `.toFixed()` on
+                // it used to throw (caught, but silently, one EvalFilterFn error log per
+                // candidate, every frame). Return "" explicitly instead, matching the
+                // primary label's own no-content pattern above -- PointStyleBuilder::
+                // addFeature() (pointStyleBuilder.cpp) now kills the icon outright when
+                // this label ends up with no content, so a naked dot can no longer result.
+                if (feature.ele === undefined || feature.ele === null) { return ""; }
+                const ele = global.metric_units ? feature.ele : feature.ele*3.2808399;
+                return ele.toFixed(0);
+            }
+          # The elevation figure: a datum, not a name. Condensed regular, a step smaller
+          # and a step lighter in colour than the name, slightly tracked so small numerals
+          # keep their counters open.
+          font:
+            family: global.condensed_font
+            weight: 600
+            size: 11px
+            letter_spacing: 0.05
+            fill: global.color.peak_elevation
+
+
   boundaries:
     data: { source: osm, layer: boundary }
     filter:
@@ -3453,14 +3895,16 @@ layers:
           text_source: global.names_one_line #{ left: "", right: global.names_one_line } -- need to fix tilemaker
           font:
             family: global.primary_font
+            weight: 400
             size: 10px
+            letter_spacing: 0.22
             fill: global.color.place_name
             stroke: { color: global.color.place_halo, width: 4 }
             transform: uppercase
       country:
         filter: { admin_level: 2 }
         draw:
-          text: { font: { size: 12px, weight: global.bold_weight } }
+          text: { font: { size: 12px, weight: 500, letter_spacing: 0.3 } }
 
   places:
     data: { source: osm, layer: place }
@@ -3490,6 +3934,7 @@ layers:
             priority: global.priority.place_fn
             font:
               family: global.primary_font
+              weight: 500
               fill: global.color.place_name
               stroke: { color: global.color.place_halo, width: 4 }
               size: [[8, 10px], [12, 16px]]
@@ -3508,7 +3953,7 @@ layers:
           }
       city-1m:
         filter: { population: { min: 1000000 } }
-        draw: { points: { text: { font: { weight: global.bold_weight } } } }
+        draw: { points: { text: { font: { weight: 600 } } } }
       city-500k:
         filter: [{ capital: "yes" }, { population: { min: 500000 } }]
         draw:
@@ -3516,7 +3961,7 @@ layers:
             points:
               {
                 visible: true,
-                text: { font: { size: [[6, 12px], [8, 14px], [12, 20px]] } },
+                text: { font: { weight: 700, size: [[6, 12px], [8, 14px], [12, 20px]] } },
               },
           }
       city-100k:
@@ -3526,7 +3971,7 @@ layers:
             points:
               {
                 visible: true,
-                text: { font: { size: [[8, 12px], [12, 18px]] } },
+                text: { font: { weight: 600, size: [[8, 12px], [12, 18px]] } },
               },
           }
       default:
@@ -3546,6 +3991,7 @@ layers:
           priority: global.priority.place_fn
           font:
             family: global.primary_font
+            weight: 400
             size: 12px
             fill: global.color.place_name
             stroke: { color: global.color.place_halo, width: 4 }
@@ -3553,12 +3999,19 @@ layers:
       islands:
         exclusive: true
         filter: { place: [island, islet, archipelago] }
-        # natural landform, not a settlement -- serif like other physical features,
-        # italic to match the water it sits in
-        draw: { text: { font: { family: global.natural_font, style: italic } } }
+        # an island is surrounded by water and named like it: italic, lightly tracked
+        draw:
+          text:
+            font:
+              family: global.natural_font
+              style: italic
+              weight: 400
+              letter_spacing: 0.12
+              fill: global.color.water_name
+              stroke: { color: global.color.water_halo, width: 3 }
         archipelago:
           filter: { place: archipelago }
-          draw: { text: { font: { transform: uppercase } } }
+          draw: { text: { font: { transform: uppercase, letter_spacing: 0.25 } } }
         show:
           filter:
             - { area: { min: 1500px2, max: 350000px2 } }
@@ -3568,7 +4021,7 @@ layers:
       continents:
         exclusive: true
         filter: { place: continent, $zoom: { min: 2, max: 3 } }
-        draw: { text: { font: { transform: uppercase } } }
+        draw: { text: { font: { transform: uppercase, weight: 300, letter_spacing: 0.5 } } }
 
       countries:
         exclusive: true
@@ -3583,7 +4036,12 @@ layers:
         draw:
           text:
             visible: true
-            font: { weight: 600, size: [[6, 14px], [8, 20px]] }
+            # country names: light tracked capitals - big, quiet, spread across the land
+            font:
+              weight: 300
+              size: [[6, 14px], [8, 20px]]
+              transform: uppercase
+              letter_spacing: 0.34
 
       regions:
         exclusive: true
@@ -3594,7 +4052,9 @@ layers:
           text:
             visible: true
             font:
+              weight: 400
               size: [[6, 10px], [8, 12px]]
+              letter_spacing: 0.24
               transform: uppercase
         big:
           filter: { ISO3166_2: [US, CA, CN] }
@@ -3623,8 +4083,9 @@ layers:
                   visible: true,
                   font:
                     {
-                      weight: global.bold_weight,
+                      weight: 600,
                       size: [[8, 10px], [12, 16px]],
+                      letter_spacing: 0.01,
                     },
                 },
             }
@@ -3633,19 +4094,39 @@ layers:
             draw: { text: { font: { size: [[8, 12px], [12, 18px]] } } }
           city-500k:
             filter: { population: { min: 500000 } }
-            draw: { text: { font: { size: [[8, 14px], [12, 20px]] } } }
+            draw: { text: { font: { weight: 700, size: [[8, 14px], [12, 20px]] } } }
         town:
           filter: { place: town, $zoom: { min: 9, max: 14 } }
           draw:
-            { text: { visible: true, font: { size: [[8, 10px], [12, 14px]] } } }
+            {
+              text:
+                {
+                  visible: true,
+                  font: { weight: 500, size: [[8, 10px], [12, 14px]] },
+                },
+            }
         village:
           filter: { place: village, $zoom: { min: 11, max: 15 } }
           draw:
-            { text: { visible: true, font: { size: [[8, 9px], [12, 12px]] } } }
+            { text: { visible: true, font: { weight: 400, size: [[8, 9px], [12, 12px]] } } }
         hamlet:
           filter: { place: hamlet, $zoom: { min: 13, max: 15 } }
+          # smallest settlements: Condensed, a notch lighter in ink, opened up slightly
           draw:
-            { text: { visible: true, font: { size: [[8, 8px], [12, 10px]] } } }
+            {
+              text:
+                {
+                  visible: true,
+                  font:
+                    {
+                      family: global.condensed_font,
+                      weight: 400,
+                      size: [[8, 8px], [12, 10px]],
+                      letter_spacing: 0.04,
+                      fill: global.color.hamlet_name,
+                    },
+                },
+            }
         # most towns in China have place:CN, but many villages do not, so this is the best we can do
         "!china":
           filter: { place: town, place_CN: true, $zoom: { max: 10 } }
@@ -3669,8 +4150,9 @@ layers:
             #priority: global.priority.neighborhood - use place_fn
             interactive: false
             font:
+              weight: 500
               size: [[14, 10.5px], [16, 12.5px]]
-              style: italic
+              letter_spacing: 0.16
               fill: global.color.hood_name
               stroke: { color: global.color.hood_halo }
               transform: uppercase

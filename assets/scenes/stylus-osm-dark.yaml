@@ -10,6 +10,11 @@ global:
         water: '#004080'
         spring: hsl(205, 50%, 74%)
         parks: hsl(135, 33%, 27%)  #was '#385038'
+        park_edge_line: hsl(135, 40%, 55%)
+        park_edge_band: hsl(135, 40%, 36%)
+        park_edge_line_u: '#5eba75'
+        park_edge_water_band_u: '#497eab'
+        park_edge_water_line_u: '#6ea1cf'
         forest: hsl(135, 33%, 35%)
         scrub: hsl(135, 33%, 22%)
         farmland: hsl(105, 33%, 27%)
@@ -52,12 +57,22 @@ global:
         place_halo: black
         hood_name: '#ffad99'
         hood_halo: black
-        park_name: lightgreen
+        park_name: '#9ccf9f'
         park_halo: black
         ferry_name: '#8db3ce'
         ferry_halo: black
         water_name: hsl(190, 32%, 76%)
         water_halo: black
+        glacier_name: '#8fc7e8'
+        glacier_halo: black
+        peak_name: '#f2ece3'
+        peak_elevation: '#c4b8a6'
+        peak_halo: black
+        range_name: '#dccfbe'
+        range_halo: '#000000'
+        valley_name: '#c2b59d'
+        valley_halo: '#000000'
+        hamlet_name: '#d8d8d8'
         landuse_name: [0.75,0.75,0.75]
         airport_name: '#88C5E5'
 
