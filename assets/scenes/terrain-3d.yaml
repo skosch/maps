@@ -14,7 +14,8 @@ global:
     #  draped polygons into visible tan slivers, increasingly so the closer the camera is
     terrain_depth_slope: 1.0
     elevation_sources: [elevation]
-    fog_color: '#FFFFFF'
+    # haze color: aerial perspective in the fog below, and the sky's horizon color (SkyManager)
+    fog_color: '#DCE4EC'
     #show_land_polygons: false  -- set in config updates
 
 
@@ -45,6 +46,17 @@ styles:
                     float cospitch = u_view[2][2];
                     float eyeh = -u_view[3][2];  // distance from eye to map center
                     float fog = exp(u_fog_density * v_position.z/eyeh/(cospitch + 0.5));
+                    // With the terrain bend the far terrain ends at the far plane, below the sky's
+                    //  horizon row: fade it completely into the haze color before it gets there so it
+                    //  dissolves into the sky instead of ending in a visible edge.
+                    float bendRamp = terrainBendRamp();
+                    if (bendRamp > 0.0) {
+                        float farD = u_proj[3][2] / (u_proj[2][2] + 1.0);
+                        fog = min(fog, 1.0 - bendRamp * smoothstep(0.55 * farD, 0.97 * farD, -v_position.z));
+                    }
+                    #ifdef FOREST_TREES
+                    fog = mix(1.0, fog, u_pf_haze);   // forest keeps more of its colour at tilt (u_pf_haze: 1 = same haze as terrain)
+                    #endif
                     color.rgb = mix(u_fog_color.rgb, color.rgb, clamp(fog, 0.0, 1.0));
                     #endif
 
@@ -98,4 +110,13 @@ styles:
                     #endif
                     position.z += float(TANGRAM_TERRAIN_SCALE) * elev3d;
                     v_world_position.z += elev3d;
+                    // curved world (global.terrain_bend_slope): position is already meters relative to
+                    //  the view center here. v_world_position keeps the TRUE elevation (snow line,
+                    //  contours, slope), only the drawn geometry sinks.
+                    position.z -= terrainBendDrop(position.xy);
+                    #ifdef TANGRAM_RASTER_STYLE
+                    // skirt twin of a tile-border vertex (RasterStyle::build): hang it below the
+                    //  border so cracks between differently-resolved neighbors never show
+                    position.z -= terrainSkirtDrop(v_is_skirt);
+                    #endif
                     #endif

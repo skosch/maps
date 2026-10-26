@@ -13,6 +13,8 @@
 #include <algorithm>
 // for elevation
 #include "util/elevationManager.h"
+#include "view/view.h"
+#include "csscolorparser.hpp"
 #include "data/rasterSource.h"
 #include "debug/frameInfo.h"
 #include "debug/profiler.h"
@@ -870,6 +872,24 @@ void MapsApp::mapUpdate(double time)
   if(map->getScene()->isReady()) {}
   else if(map->getScene()->completeScene(map->getView())) {
     tracksDataSource->rasterSources().clear();
+    {
+      // Terrain bend + sky (docs: terrain-3d.yaml, View::setTerrainBend). Read from the scene's globals
+      //  so the vertex shader (which gets them as uniforms), the CPU label projection and the sky
+      //  gradient always agree. Bend only applies with 3D terrain.
+      const auto& globals = sceneConfig()["global"];
+      auto parseColor = [&](const char* key, glm::vec4 dflt) {
+        std::string str = globals[key].as<std::string>("");
+        if(str.empty()) { return dflt; }
+        bool ok = false;
+        CSSColorParser::Color c = CSSColorParser::parse(str, ok);
+        return ok ? glm::vec4(c.r/255.f, c.g/255.f, c.b/255.f, 1.f) : dflt;
+      };
+      Tangram::View& view = map->getView();
+      view.setTerrainBend(terrain3D ? globals["terrain_bend_slope"].as<float>(0.f) : 0.f,
+                          globals["terrain_bend_radius"].as<float>(1.5f));
+      glm::vec4 horizon = parseColor("fog_color", glm::vec4(0.7f, 0.8f, 0.9f, 1.f));
+      view.setSkyColors(horizon, parseColor("sky_zenith_color", glm::vec4(0.4f, 0.6f, 0.9f, 1.f)));
+    }
     if(terrain3D) {
       auto* elevMgr = map->getScene()->elevationManager();
       if(elevMgr)

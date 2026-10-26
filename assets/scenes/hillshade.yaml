@@ -33,9 +33,9 @@ global:
     #  (elevation.yaml). contour_default covers bare earth/scree/grass/etc.; the old
     #  contour_color above remains for this pass's raster-basemap branch (satellite),
     #  where nothing beneath owns contours.
-    contour_default: '#7E6E60'
-    contour_forest: '#49663F'
-    contour_ice: '#AFC4D4'
+    contour_default: '#A59B8E'
+    contour_forest: '#6E8560'
+    contour_ice: '#C0D1DD'
     base_mix_color: [0.9, 0.9, 0.9, 0.8]
     show_contours: false
     show_hypsometric: true
@@ -202,6 +202,21 @@ application:
             min: 90
             max: 180
             step: 5
+        # Tilted-view sun (2026-10-24): the screen azimuth/elevation the sun swings TO as the
+        #  camera tilts (tilt_morph 0 -> 1), instead of staying behind the terrain. 135 = same
+        #  as 2D (the old backlit behavior), 180 = from the left, 225 = from the front-left.
+        u_sun_azimuth_3d:
+            style: hillshade
+            label: 3D Sun Screen Azimuth (deg)
+            min: 135
+            max: 270
+            step: 5
+        u_sun_elev_3d:
+            style: hillshade
+            label: 3D Sun Elevation (deg)
+            min: 15
+            max: 70
+            step: 1
         # lighting-normal exaggeration at full tilt (interpolates from Hillshade Exaggeration
         #  at zenith): lower = more honest normals for geometry displayed at true scale
         u_exaggerate_3d:
@@ -269,6 +284,12 @@ application:
             min: 0
             max: 1
             step: 0.05
+        u_lum_3d_scale:
+            style: hillshade
+            label: 3D Luminance Scale
+            min: 0.6
+            max: 1.1
+            step: 0.01
         u_shade3d_gain:
             style: hillshade
             label: 3D Shade Gain
@@ -396,6 +417,12 @@ styles:
                     // wall rock for near-vertical drawn triangles (applyWallRock, elevation.yaml):
                     //  gaps between land-cover polygons would otherwise show this ground as a slab
                     color.rgb = applyWallRock(color.rgb, u_wall_rock_color.rgb);
+                    #ifdef SNOW_MODE
+                    color.rgb = applySnow(color.rgb, 1.0);
+                    #endif
+                    #ifdef TANGRAM_TERRAIN_3D
+                    color.rgb = terrainSlopeShade(color.rgb, 0.7);   // slope lighting at tilt (elevation.yaml)
+                    #endif
                     #ifdef SHOW_CONTOURS
                     // Default-colored contours on bare earth. This style is the baseline
                     //  under every land-cover polygon (which repaints the same pixels with
@@ -414,6 +441,9 @@ styles:
         raster: custom
         #texcoords: true
         blend: nonopaque
+        # does not draw where a cover marked itself as doing its own terrain lighting (forest-trees:
+        #  stencil_write, stylus-osm.yaml): the veil is white at alpha 0.25-0.55 and washes such covers out
+        stencil_skip: true
         # blend_order for translucent lines is -1001 for stylus-osm-dark
         blend_order: -1002
         shaders:
@@ -503,6 +533,11 @@ styles:
                 #  left diagonal, yaw-only (tilt/pitch never moves the sun - normal block, "Third
                 #  revision"). Default matches the zenith value exactly (parity contract).
                 u_sun_azimuth: 135.0
+                # tilted-view counterparts (see gui comment): at tilt_morph 1 the sun is at this
+                #  screen azimuth/elevation, front-left of the viewer so faces toward the camera
+                #  are modeled instead of backlit. tilt 0 stays exactly the 2D values above.
+                u_sun_azimuth_3d: 200.0
+                u_sun_elev_3d: 38.0
                 # lighting-normal exaggeration at full tilt (interpolates from u_exaggerate at
                 #  zenith - see hscale in the normal block; 4.5x normals on 1x geometry saturate
                 #  the sky term and flatten tilted views)
@@ -533,6 +568,10 @@ styles:
                 #  window carries less punch per unit alpha, so alpha rises to compensate.
                 u_shade3d_alpha: 0.55
                 u_shade3d_gain: 1.4
+                # overall 3D luminance scale (1 = none): L is multiplied by mix(1, this, tilt_morph)
+                #  after the tone shoulder. Flat ground sits at L=1 (a white veil that LIFTS the base
+                #  color), so <1 darkens tilted terrain; 2D is untouched.
+                u_lum_3d_scale: 0.9
                 # aerial perspective: fraction of shading contrast removed at full haze
                 u_haze_contrast: 0.6
                 # Warm/cool chromatic shading (docs/terrain-lighting-v2-plan.md Phase 3):
@@ -547,10 +586,10 @@ styles:
                 #  (0.88/0.94/1.10, 1.10/1.03/0.88) and u_shade_warmth raised 0.5 -> 1.0 to
                 #  compensate; still nowhere near clipping (tint * gain*L stays well inside
                 #  [0,~1.3] over realistic L).
-                u_shade_cool: [0.78, 0.88, 1.24]
-                u_shade_warm: [1.24, 1.06, 0.78]
+                u_shade_cool: [0.84, 0.86, 1.20]
+                u_shade_warm: [1.10, 1.04, 0.92]
                 u_shade_warmth: 1.0
-                u_shade_warmth_2d: 0.0
+                u_shade_warmth_2d: 0.25
                 # Cast shadows (docs/terrain-lighting-v2-plan.md Phase 4): strength
                 #  interpolates 2D -> 3D like the rest of the model (default 0 in 2D, no
                 #  cast shadows at zenith, matching swisstopo practice); soft/bias/d0 tune
@@ -882,7 +921,7 @@ styles:
                     //  shared with stylus-osm.yaml's rock-texture micro-normal shading so the two
                     //  never disagree under map rotation. See that function's comment for the
                     //  camera-right/yaw-only-anchoring rationale (unchanged from here).
-                    vec3 s_world = screenAnchoredSunDir(u_sun_azimuth, u_sun_elev);
+                    vec3 s_world = tiltedSunDir(u_sun_azimuth, u_sun_elev, u_sun_azimuth_3d, u_sun_elev_3d, tilt_morph);
                     // Zenith parity (exact by construction): at north-up zenith, cam_right = world
                     //  east = (1,0,0), so e=(1,0), h=(0,1). With s_az=135 deg, az_dir=(cos135,sin135)=
                     //  (-0.70711,0.70711). With s_elev=35.264 deg (asin(1/sqrt(3))), cos(s_elev)=
@@ -967,7 +1006,7 @@ styles:
                         dup = fract(hc/coarse)*coarse * px_per_elev;
                         ddn = abs(1. - fract(hc/coarse))*coarse * px_per_elev;
                         cov += max(0.5 - dup + coarsehw, 0.) + max(0.5 - ddn + coarsehw, 0.);
-                        base_color = mix(base_color, contour_color, min(cov, 1.));
+                        base_color = mix(base_color, contour_color, min(cov, 1.) * terrainContourTiltFade());
                     #endif  // HILLSHADE_BLEND_OVER (empty else in blend-over: see comment above)
                     }
                     #endif
@@ -1105,6 +1144,7 @@ styles:
                     //  again here so it cannot engage at T=0 even if a 2D shadow-strength slider is
                     //  nonzero (matching this file's zenith-parity discipline).
                     L *= mix(1.0, 1.0 - u_shadow_darken, shadow_amt * tilt_morph);
+                    L *= mix(1.0, u_lum_3d_scale, tilt_morph);
                     // composite as a translucent blend-over layer, same trick as the 2D 4*shading-3;
                     //  gain/alpha interpolate from the 2D constants (4.0/0.25) at T=0 to the tilted-
                     //  view sliders at T=1
@@ -1123,6 +1163,34 @@ styles:
                     float warmth = mix(u_shade_warmth_2d, u_shade_warmth, tilt_morph)
                                  * (1.0 - u_haze_contrast * haze * tilt_morph);
                     color.rgb = max(color.rgb * mix(vec3(1.0), tint, warmth), 0.0);
+                    // ---- Tilted views: physically based lighting (docs: see terrainSlopeLight in elevation.yaml) ----
+                    //  The veil above (white at alpha .55 at full tilt) lifts and desaturates everything and cannot make dark
+                    //  covers dark. As the camera tilts, the SLOPE term of the lighting moves into the land covers themselves
+                    //  (they multiply their own albedo by the sun/sky irradiance on the slope, terrainSlopeLight), and this
+                    //  pass fades to a veil that is (1) the constant flat-ground lift of the 2D look (alpha .25, same as
+                    //  top-down) so brightness never depends on tilt, plus (2) a cool dark veil for what only this pass can
+                    //  see - occlusion (texture-shading SVF proxy) and cast shadows. A dark veil over D is D*(1-alpha): a true
+                    //  multiply. At tilt 0 nothing here runs and the old veil is untouched.
+                    if (tilt_morph > 0.0) {
+                        // fraction of the light that survives occlusion / cast shadow, relative to unoccluded unshadowed
+                        float skyT = clamp(normal.z, 0.0, 1.0);
+                        float Esun = w_sun * sun;
+                        float Esky0 = w_amb + w_sky * skyT;
+                        float Esky = w_amb * mix(1.0, occ, tilt_morph * u_occ_ambient) + w_sky * skyT * mix(1.0, occ, tilt_morph);
+                        float keep = min((Esky + Esun * sunvis) / max(Esky0 + Esun, 1e-4), 1.0);
+                        keep *= mix(1.0, 1.0 - u_shadow_darken, shadow_amt);
+                        keep = mix(keep, 1.0, u_haze_contrast * haze);
+                        float aD = clamp(1.0 - keep, 0.0, 1.0);
+                        const float aLift = 0.25;                        // the 2D flat-ground veil: alpha and (white) level
+                        const vec3 cLift = vec3(1.06);
+                        const vec3 cDark = vec3(0.04, 0.07, 0.17);       // shadow is lit by the sky: blue-black, not grey
+                        float aN = 1.0 - (1.0 - aD) * (1.0 - aLift);
+                        vec3 cN = ((1.0 - aD) * aLift * cLift + aD * cDark) / max(aN, 1e-4);
+                        float aO = color.a;
+                        float aM = mix(aO, aN, tilt_morph);
+                        vec3 cM = mix(color.rgb * aO, cN * aN, tilt_morph) / max(aM, 1e-4);
+                        color = vec4(cM, aM);
+                    }
                     // contours/hypsometric tint (base_color) composite over the shading layer once,
                     //  tilt-independent by design
                     color = mix(color, base_color, base_color.a);

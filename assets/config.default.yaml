@@ -9,6 +9,7 @@ sources:
   list_order:
     - stylus-osm-terrain
     - stylus-bike-hike
+    - stylus-snow
     - stylus-satellite
     - stylus-worldcover
     - stylus-transit

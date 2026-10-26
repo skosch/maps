@@ -43,6 +43,32 @@ global:
     #  residual aliasing. One tap either way (same cost). Terrain mesh and drape lattice share the
     #  function (latticeNodeElevation), so they cannot disagree.
     terrain_lattice_pool: 0.7
+    # Terrain tile skirts (RasterStyle::build, 2026-10-24): a curtain this many lattice cells deep
+    #  hangs under every terrain tile border so height disagreement between neighbors of different
+    #  zoom / DEM resolution (T-junctions, different source samples) never shows as a crack/dark
+    #  line. 0 = effectively off (zero-height curtain).
+    terrain_skirt_cells: 3.0
+    # Snow Mode ("show this landscape in snow"): an explicit map-mode choice (the Snow source in
+    #  mapsources.yaml), never inferred from date or location. No snow data is involved: snow lies
+    #  wherever the ground is above a latitude-derived WINTER snow line (applySnow below), is
+    #  thinner under forest, and slides off steep ground. snow_line_offset (meters) biases the
+    #  line for a region that looks wrong - positive = less snow, negative = more.
+    # Terrain bend ("curved world", the Heinrich Berann panorama look): in tilted views the terrain and
+    #  everything draped on it droops away from the view center along a hyperbola
+    #    drop(d) = slope * ramp(pitch) * (sqrt(d^2 + R^2) - R),   R = radius * (eye distance)
+    #  - parabolic (a gentle sphere-like curve) for d << R, a straight slope of `slope` (rise/run) for
+    #  d >> R, so it never rolls up into a ball. That exposes a horizon and sky above the far terrain.
+    #  slope is tan of the far-field droop angle (0.18 ~ 10 deg; 0 = off); radius is in eye distances
+    #  (smaller = the bend starts closer); ramp fades the effect in from 20 to 55 deg of camera pitch,
+    #  so top-down views are untouched. The same formula runs on the CPU (View::terrainBendDrop) for
+    #  label projection - keep the two in sync - and the app reads both numbers from here
+    #  (MapsApp::mapUpdate).
+    terrain_bend_slope: 0.18
+    terrain_bend_radius: 1.5
+    # sky gradient (SkyManager) is fog_color at the horizon up to this overhead
+    sky_zenith_color: '#1c3f78'
+    snow_mode: false
+    snow_line_offset: 0.0
 
 sources:
     elevation:
@@ -84,6 +110,7 @@ styles:
                 ELEVATION_TILE_PIXELS: global.elevation_tile_pixels
                 TERRAIN_MESH_ZBIAS: global.terrain_mesh_zbias
                 LATTICE_POOL: global.terrain_lattice_pool
+                SKIRT_CELLS: global.terrain_skirt_cells
                 # terrainContourCoverage() (end of the global block below) reads these.
                 #  Declaring them HERE - not in the styles that call the function -
                 #  matters: the global block merges into EVERY style on the
@@ -93,10 +120,14 @@ styles:
                 #  single point of truth. (hillshade.yaml re-declares METRIC_UNITS
                 #  identically - benign.)
                 METRIC_UNITS: global.metric_units
+                SNOW_MODE: global.snow_mode
             uniforms:
                 # sea-level floor for the underwater-contour guard; hillshade exposes a
                 # GUI slider for its own copy, the vector styles share this default
                 u_min_contour_elev: 0.0
+                u_snow_line_offset: global.snow_line_offset
+                u_bend_slope: global.terrain_bend_slope
+                u_bend_radius: global.terrain_bend_radius
             blocks:
                 global: |
                     #if defined(TANGRAM_FRAGMENT_SHADER) || defined(TANGRAM_VERTEX_RASTERS)
@@ -205,6 +236,16 @@ styles:
                         float wnz = (wl > 1e-6 && wl < 1e9) ? abs(wc.z) / wl : 1.0;
                         float wTan = sqrt(max(1.0 - wnz * wnz, 0.0)) / max(wnz, 0.02);
                         float wallW = smoothstep(1.4, 2.4, wTan);
+                    #ifdef TANGRAM_RASTER_STYLE
+                        // terrain skirt curtain (rasterStyle.cpp): vertical by construction, but it is
+                        //  only a crack filler - keep the ground's own color, not rock
+                        wallW *= 1.0 - v_is_skirt;
+                    #endif
+                        // perf: the 5-octave noise below only matters on walls (wallW > 0, i.e.
+                        //  slopes steeper than ~54 deg); on the vast majority of fragments the
+                        //  result is exactly `col`. The derivatives above are already taken, and
+                        //  the noise uses none, so a divergent early-out is safe.
+                        if (wallW <= 0.0) { return col; }
                         float foot = max(length(wdx), length(wdy));        // meters per pixel
                         vec3 pw = v_world_position.xyz;
                         pw.xy *= wCos;
@@ -235,6 +276,19 @@ styles:
                     //  fine as the DEM or on non-mosaic rasters.
                     float latticeNodeElevation(vec2 uv) {
                     #ifdef ELEVATION_MOSAIC
+                        // Node-registered lattice mapping (2026-10-24, "steps / dark lines along tile
+                        //  borders"): lattice node k/N is DEM sample i = (k/N)*Wp, whose texel center
+                        //  is at (i + 0.5)/W in tile-local UV. The plain remap uv*W put node uv=1 at
+                        //  texel Wp+W (one texel PAST the shared edge line = the neighbor's sample 1)
+                        //  and drifted every interior node up to a texel off, while the neighbor's
+                        //  uv=0 node reads its sample 0 - so the two meshes disagreed by a DEM texel
+                        //  (several meters on slopes) along the shared border: a step/crack. Mapping
+                        //  nodes through (uv*Wp + 0.5*overlap)/W makes both sides read the identical
+                        //  shared sample (overlap 0: identity).
+                        {
+                            vec2 nWpv = rasterPixelSize(ELEVATION_INDEX) / float(ELEVATION_MOSAIC_SPAN);
+                            uv = (uv * nWpv + 0.5 * float(ELEVATION_TILE_OVERLAP)) / (nWpv + float(ELEVATION_TILE_OVERLAP));
+                        }
                         if (float(LATTICE_POOL) > 0.0) {
                             float effWp = rasterPixelSize(ELEVATION_INDEX).x / float(ELEVATION_MOSAIC_SPAN);
                             float tSpan = effWp / float(ELEVATION_TILE_PIXELS) * u_raster_offsets[ELEVATION_INDEX].z;
@@ -256,6 +310,23 @@ styles:
                     #endif
                         return getElevationAt(uv);
                     }
+                    #ifdef TANGRAM_VERTEX_SHADER
+                    // Skirt depth (true meters) for the terrain mesh's border-twin vertices
+                    //  (RasterStyle::build; flagged in polygon.vs): SKIRT_CELLS lattice cells of this
+                    //  tile. Neighboring tiles at different zoom / DEM resolution disagree on
+                    //  border heights by up to roughly (slope * cell size), so the curtain must be
+                    //  a few cells deep. Mirrors terrainMeshCellsAt (builders.h) like the drape
+                    //  lattice does. 0 for ordinary vertices.
+                    float terrainSkirtDrop(float isSkirt) {
+                        if (isSkirt < 0.5) { return 0.0; }
+                        float zr = u_terrain_ref_zoom;
+                        float meshN = max(4.0, 64.0 * exp2(u_terrain_mesh_boost - min(max(u_tile_origin.w - zr, 0.0), 6.0)));
+                        float sUn = exp(u_map_position.y / 6378137.0);
+                        float sCos = 2.0 / (sUn + 1.0 / sUn);
+                        float cellM = 2.0 * 3.141592 * 6378137.0 * exp2(-u_tile_origin.w) / meshN * sCos;
+                        return float(SKIRT_CELLS) * cellM;
+                    }
+                    #endif
                     float getTerrainMeshElevation(float minElev) {
                         // Lattice cell count, derived from the BOUND TEXTURE'S OWN pixel
                         //  dimensions rather than guessed from this vector tile's styling/data zoom
@@ -444,6 +515,39 @@ styles:
                         vec2 az_dir = cos(s_az) * e + sin(s_az) * h;
                         return vec3(az_dir * cos(s_elev), sin(s_elev));
                     }
+                    // Tilt-dependent sun (2026-10-24): a purely yaw-anchored upper-left sun is
+                    //  correct for the top-down 2D look, but once the camera tilts it sits BEHIND
+                    //  the terrain - every face toward the viewer goes flat gray while grazing
+                    //  back-slopes blow out. The sun's SCREEN azimuth therefore swings from the 2D
+                    //  convention (az2d, upper-left) toward the viewer's front-left (az3d) as
+                    //  tiltMorph goes 0 -> 1, and its elevation follows. Berann / Swisstopo
+                    //  panoramas light from the front-left for the same reason. Still yaw-anchored
+                    //  (never reads pitch directly) and an exact no-op at tiltMorph == 0.
+                    //  Hillshade and the rock micro-normals both call this so they never disagree.
+                    vec3 tiltedSunDir(float az2d, float elev2d, float az3d, float elev3d, float tiltMorph) {
+                        return screenAnchoredSunDir(mix(az2d, az3d, tiltMorph), mix(elev2d, elev3d, tiltMorph));
+                    }
+                    // Terrain bend (see global.terrain_bend_slope): ramp 0 below 20 deg of camera pitch, 1 above 55.
+                    float terrainBendRamp() {
+                        float pitch = acos(clamp(u_view[2][2], 0.0, 1.0));
+                        return u_bend_slope > 0.0 ? smoothstep(radians(20.0), radians(55.0), pitch) : 0.0;
+                    }
+                    // meters (>= 0) that a point `rel` (projected meters from the view center) sinks
+                    float terrainBendDrop(vec2 rel) {
+                        float ramp = terrainBendRamp();
+                        if (ramp <= 0.0) { return 0.0; }
+                        float R = max(u_bend_radius * (-u_view[3][2]), 1.0);   // eye distance
+                        return u_bend_slope * ramp * (sqrt(dot(rel, rel) + R * R) - R);
+                    }
+                    // 0 at zenith .. 1 by 45 deg of camera pitch (same ramp hillshade uses).
+                    float terrainTiltMorph() {
+                        return smoothstep(0.0, radians(45.0), acos(clamp(u_view[2][2], 0.0, 1.0)));
+                    }
+                    // Contour lines are a top-down-map device; in perspective they turn into noisy
+                    //  moire on steep slopes. Full strength up to 30 deg of camera pitch, gone by 45.
+                    float terrainContourTiltFade() {
+                        return 1.0 - smoothstep(radians(30.0), radians(45.0), acos(clamp(u_view[2][2], 0.0, 1.0)));
+                    }
                     // Land-cover-colored contour lines: precise-elevation stencil + line
                     //  coverage in one function, shared by every style that draws its own
                     //  contours (hillshade.yaml's terrain-ground, stylus-osm.yaml's
@@ -467,6 +571,8 @@ styles:
                         // same zoom floor as hillshade's own ladder (below it, hypsometric
                         //  tints rule; drawing 100m lines at country scale is pure noise)
                         if (u_map_position.z < 10.) { return 0.; }
+                        float tiltFade = terrainContourTiltFade();
+                        if (tiltFade <= 0.) { return 0.; }
                         vec2 st = currentRasterUV(ELEVATION_INDEX);
                         vec2 texwh = rasterPixelSize(ELEVATION_INDEX);
                         #ifdef ELEVATION_MOSAIC
@@ -557,7 +663,142 @@ styles:
                         dup = fract(hc/coarse)*coarse * px_per_elev;
                         ddn = abs(1. - fract(hc/coarse))*coarse * px_per_elev;
                         cov += max(0.5 - dup + coarsehw, 0.) + max(0.5 - ddn + coarsehw, 0.);
-                        return min(cov, 1.);
+                        return min(cov, 1.) * tiltFade;
+                    }
+                    // True terrain gradient (rise over run, east/north) at this fragment from the DEM:
+                    //  central differences, one-sided (over the true sample spacing) at tile edges so
+                    //  there is no seam where tiles meet. Same texel/axis conventions as the normal in
+                    //  hillshade.yaml and terrainContourCoverage() above.
+                    vec2 terrainGradient() {
+                        vec2 st = currentRasterUV(ELEVATION_INDEX);
+                        vec2 texwh = rasterPixelSize(ELEVATION_INDEX);
+                        #ifdef ELEVATION_MOSAIC
+                        texwh = texwh / float(ELEVATION_MOSAIC_SPAN) + float(ELEVATION_TILE_OVERLAP);
+                        #endif
+                        vec2 duv = 1./texwh;
+                        vec2 cen_ij = floor(st * texwh) + 0.5;
+                        #ifdef ELEVATION_MOSAIC
+                        float hE = elevationTexelAt(cen_ij, vec2( 1., 0.));
+                        float hW = elevationTexelAt(cen_ij, vec2(-1., 0.));
+                        float hN = elevationTexelAt(cen_ij, vec2( 0., 1.));
+                        float hS = elevationTexelAt(cen_ij, vec2( 0.,-1.));
+                        vec2 span = vec2(2., 2.);
+                        #else
+                        vec2 hi = min(cen_ij + 1., texwh - 0.5);
+                        vec2 lo = max(cen_ij - 1., vec2(0.5));
+                        float hE = getElevationAt(vec2(hi.x, cen_ij.y) * duv);
+                        float hW = getElevationAt(vec2(lo.x, cen_ij.y) * duv);
+                        float hN = getElevationAt(vec2(cen_ij.x, hi.y) * duv);
+                        float hS = getElevationAt(vec2(cen_ij.x, lo.y) * duv);
+                        vec2 span = max(hi - lo, vec2(1.));
+                        #endif
+                        vec2 dxy = 2.*3.141592*6378137.0*exp2(-u_tile_origin.w)*duv/u_raster_offsets[ELEVATION_INDEX].z;
+                        float un = exp(u_map_position.y/6378137.0);
+                        float coslat = 2.0/(un + 1.0/un);
+                        return vec2(hE - hW, hN - hS) / (span * dxy) / coslat;
+                    }
+                    // ---- Physically based slope lighting for land covers (replaces the white hillshade veil's slope term) ----
+                    //  Reflected light = albedo x irradiance, and irradiance is TWO lights: warm direct sun x cos(angle to the
+                    //  slope) plus bluish sky light x visible sky. Returns the irradiance on this fragment's slope relative to
+                    //  flat ground (flat = 1), per channel, so lit slopes drift warm and shaded ones cool with chroma preserved.
+                    //  A cover multiplies its albedo by mix(1, M, k): k = how much the terrain normal matters for it (rough
+                    //  vegetation little, bare rock and snow fully, water not at all). Gated by tilt: at tilt 0 it is 1 and the
+                    //  top-down look is the 2D veil's, unchanged; hillshade.yaml's veil fades its own slope term out as this fades in.
+                    //  Weights/angles mirror hillshade.yaml's tilted model (u_amb_weight_3d .25, u_sky_weight .3, u_sun_weight .45,
+                    //  u_sun_wrap .2, u_sun_gamma 1.2, u_exaggerate 4.5 -> u_exaggerate_3d 2, sun 135/35.264 -> 200/38): keep in sync.
+                    //  Occlusion and cast shadows stay in the hillshade pass (darkening veil, see its color block).
+                    vec3 terrainSlopeLight() {
+                        float tm = terrainTiltMorph();
+                        if (tm <= 0.0) { return vec3(1.0); }
+                        vec2 grad = terrainGradient();
+                        vec3 n = normalize(vec3(-mix(4.5, 2.0, tm) * grad, 1.0));
+                        vec3 sd = normalize(tiltedSunDir(135.0, 35.264, 200.0, 38.0, tm));
+                        float wrap = 0.2 * tm, gam = mix(1.0, 1.2, tm);
+                        float sun = pow(clamp((dot(n, sd) + wrap) / (1.0 + wrap), 0.0, 1.0), gam);
+                        float sunF = pow(clamp((sd.z + wrap) / (1.0 + wrap), 0.0, 1.0), gam);
+                        float wa = mix(0.7, 0.25, tm), wk = mix(0.2, 0.3, tm), wu = mix(0.2, 0.45, tm);
+                        const vec3 skyC = vec3(0.88, 0.93, 1.18);     // sky light: cool, luminance ~1
+                        const vec3 sunC = vec3(1.10, 1.04, 0.90);     // direct sun: warm
+                        vec3 E  = (wa + wk * clamp(n.z, 0.0, 1.0)) * skyC + wu * sun * sunC;
+                        vec3 Ef = (wa + wk) * skyC + wu * sunF * sunC;
+                        vec3 M = E / Ef;
+                        #ifdef TANGRAM_TERRAIN_3D
+                        // aerial perspective: distance haze flattens the shading (same formula as the hillshade pass)
+                        float haze = 1.0 - clamp(exp(8.0 * u_fog_density * v_position.z / (-u_view[3][2]) / (u_view[2][2] + 0.5)), 0.0, 1.0);
+                        M = mix(M, vec3(1.0), 0.6 * haze);
+                        #endif
+                        return mix(vec3(1.0), M, tm);
+                    }
+                    // Forest variant: the SAME irradiance model, but active at every tilt (also top-down) and with the tilted
+                    //  weights, because the forest does all its own terrain shading (the hillshade veil skips it). Returns
+                    //  (per-channel irradiance ratio vs flat, its luminance ratio). The forest maps it onto a colour RANGE
+                    //  (dark green .. saturated green), not onto a veil.
+                    vec4 terrainForestLight() {
+                        float tm = terrainTiltMorph();
+                        vec2 grad = terrainGradient();
+                        vec3 n = normalize(vec3(-mix(3.0, 2.0, tm) * grad, 1.0));
+                        vec3 sd = normalize(tiltedSunDir(135.0, 35.264, 200.0, 38.0, tm));
+                        const float wrap = 0.2, gam = 1.2;
+                        float sun = pow(clamp((dot(n, sd) + wrap) / (1.0 + wrap), 0.0, 1.0), gam);
+                        float sunF = pow(clamp((sd.z + wrap) / (1.0 + wrap), 0.0, 1.0), gam);
+                        const float wa = 0.25, wk = 0.3, wu = 0.45;
+                        const vec3 skyC = vec3(0.88, 0.93, 1.18);
+                        const vec3 sunC = vec3(1.10, 1.04, 0.90);
+                        vec3 M = ((wa + wk * clamp(n.z, 0.0, 1.0)) * skyC + wu * sun * sunC) / ((wa + wk) * skyC + wu * sunF * sunC);
+                        #ifdef TANGRAM_TERRAIN_3D
+                        float haze = 1.0 - clamp(exp(8.0 * u_fog_density * v_position.z / (-u_view[3][2]) / (u_view[2][2] + 0.5)), 0.0, 1.0);
+                        M = mix(M, vec3(1.0), 0.6 * haze * tm);
+                        #endif
+                        return vec4(M, dot(M, vec3(0.299, 0.587, 0.114)));
+                    }
+                    // albedo x irradiance with a hue-preserving highlight shoulder (bright covers clip softly, not to flat white)
+                    vec3 terrainSlopeShade(vec3 col, float k) {
+                        if (k <= 0.0) { return col; }
+                        vec3 M = terrainSlopeLight();
+                        vec3 x = col * mix(vec3(1.0), M, k);
+                        vec3 over = max(x - 0.85, 0.0);
+                        return x - over + 0.15 * (1.0 - exp(-over / 0.15));
+                    }
+                    // Snow Mode ground cover. `cover` = how much of the ground the snow can hide
+                    //  (1 = open ground, ~0.65 under forest where dark trees keep showing, 0 = none,
+                    //  e.g. water). Returns col blended toward snow white; the hillshade veil drawn
+                    //  over every land cover shades it afterwards, so snow gets the same lit/shadowed
+                    //  (and, tilted, warm/cool) treatment as everything else.
+                    //  - snow line: 5000 - 110*|lat| meters (+ snow_line_offset): ~0 in the Alps at 46N
+                    //    (valleys white), ~700 m at Tahoe, ~2000 m in Florida (nothing is that high),
+                    //    ~4800 m at the equator; soft from -200 m to +250 m around the line
+                    //  - aspect: shaded slopes (poleward) keep snow ~250 m lower
+                    //  - slope: snow sticks below ~37 deg and is gone by ~55 deg (bare rock walls)
+                    // Scalar snow amount at this fragment (0..1, before the land-cover `cover` factor); has
+                    //  derivatives inside, so call it in uniform control flow. applySnow() is the colour mix.
+                    float snowAmount() {
+                        // derivatives first, in uniform control flow
+                        vec3 sdx = dFdx(v_world_position.xyz), sdy = dFdy(v_world_position.xyz);
+                        float sUn = exp(u_map_position.y / 6378137.0);
+                        float sCos = 2.0 / (sUn + 1.0 / sUn);
+                        sdx.xy *= sCos; sdy.xy *= sCos;
+                        vec3 sc = cross(sdx, sdy);
+                        float sl = length(sc);
+                        float snz = (sl > 1e-6 && sl < 1e9) ? abs(sc.z) / sl : 1.0;
+                        float geoTan = sqrt(max(1.0 - snz * snz, 0.0)) / max(snz, 0.02);
+                        vec2 g = terrainGradient();
+                        float demTan = length(g);
+                        float tanS = max(demTan, 0.8 * geoTan);
+                        float lat = degrees(atan(0.5 * (sUn - 1.0 / sUn)));
+                        float poleward = demTan > 1e-3 ? -g.y / demTan * (lat >= 0.0 ? 1.0 : -1.0) : 0.0;
+                        float line = 5000.0 - 110.0 * abs(lat) + u_snow_line_offset
+                                   - 250.0 * poleward * smoothstep(0.1, 0.4, demTan);
+                        #ifdef TANGRAM_TERRAIN_3D
+                        float elev = v_world_position.z;
+                        #else
+                        float elev = getElevationAt(currentRasterUV(ELEVATION_INDEX));
+                        #endif
+                        float gate = smoothstep(line - 200.0, line + 250.0, elev);
+                        float stick = 1.0 - smoothstep(0.75, 1.45, tanS);
+                        return gate * stick;
+                    }
+                    vec3 applySnow(vec3 col, float cover) {
+                        return mix(col, vec3(0.965, 0.975, 1.0), clamp(snowAmount() * cover, 0.0, 1.0));
                     }
                     #endif
                     #endif

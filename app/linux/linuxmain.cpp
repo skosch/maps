@@ -927,6 +927,10 @@ int main(int argc, char* argv[])
 {
   initBaseDir(argc > 0 ? argv[0] : NULL);
   MapsApp::loadConfig("");
+  // Always start in Bike & Hike mode: last_source is persisted across sessions, but the
+  //  startup map style is not meant to depend on what was selected last time. Set before
+  //  command line parsing so --sources.last_source still overrides it.
+  MapsApp::config["sources"]["last_source"] = "stylus-bike-hike";
 
   // command line args
   std::string sceneFile, importFile;  // -f scenes/scene-omt.yaml

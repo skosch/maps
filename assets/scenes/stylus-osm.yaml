@@ -15,10 +15,13 @@ global:
   #  trajectory so far [#F7F3F0 -> #F0EBEB -> #E0E0E0 -> this]. Bare unclassified ground is
   #  most of every mountain flank that carries no land-cover polygon, so its lightness sets
   #  the floor for the whole range's read. Also scene background / hillshade terrain-ground.
-  earth_color: "#CBC7BF"
+  earth_color: "#D3CEC4"
   earth_order: 599 # should be above all other polygons
+  # forest-trees = painted trees in the forest polygons (docs/tree-rendering-plan.md; u_tree_mode 0 = the cheap
+  #  painterly canopy only); unlit-polygons = the old flat fill
+  forest_style: forest-trees
   #elevation_sources: []
-  marker_font: IBM Plex Sans
+  marker_font: U001 #IBM Plex Sans
   # LABEL TYPOGRAPHY (docs/label-typography.md). One superfamily, IBM Plex Sans, used in two
   #  widths: normal (primary_font / natural_font) for settlements, regions and area names,
   #  and Condensed (condensed_font) wherever space is tight or the feature is thin and
@@ -28,9 +31,9 @@ global:
   #  family: upright for relief and settlements, italic ONLY for water and ice, tracked
   #  capitals for things that are big and diffuse (ranges, regions, parks), tight sentence
   #  case for things that are small and precise (peaks, hamlets).
-  primary_font: IBM Plex Sans
-  natural_font: IBM Plex Sans
-  condensed_font: IBM Plex Sans Condensed
+  primary_font: U001 #IBM Plex Sans
+  natural_font: U001 #IBM Plex Sans
+  condensed_font: U001Con #IBM Plex Sans Condensed
   # Glacier names: until the tile server writes `name` onto the glacier POLYGON (see
   # scripts/tilemaker/process.lua), glaciers are labelled at their centroid point. After
   # regenerating tiles, flip these two so glaciers get area labels inside their ice.
@@ -39,6 +42,12 @@ global:
   # Outline every area feature that gets (or should get) a name label, from the same tiles
   #  the label planner sees. Tile-edge cuts show up as straight lines. Debug aid.
   debug_area_outlines: false
+  # World-space area labels (docs/label-typography.md, "Round 6"): lake and glacier names are
+  #  planned from whole features stitched across tiles (osm-areas source -> AreaRegistry ->
+  #  AreaLabelManager markers) instead of per tile fragment. Off = the per-tile planner again.
+  world_area_labels: true
+  # Draw each planned part's spine (magenta/cyan/yellow...) and the necks that split parts (red circles).
+  debug_area_parts: false
   # protected-area edge band: park-edge-fade (soft gradient) or park-edge-hatch (diagonal hatching)
   park_edge_style: park-edge-fade
   bold_weight: 600 # use instead of "bold" to avoid checking for OS font if we only have semibold
@@ -74,7 +83,7 @@ global:
     default_label: black
     default_halo: white
     landuse: honeydew
-    parks: hsl(135, 33%, 81%) #'#bddec5'
+    parks: hsl(96, 40%, 79%)
     parks_border: hsl(135, 63%, 41%)
     park_edge_line: hsl(135, 36%, 28%)
     park_edge_band: hsl(135, 24%, 34%)
@@ -82,18 +91,18 @@ global:
     park_edge_line_u: '#2e613b'
     park_edge_water_band_u: '#41739f'
     park_edge_water_line_u: '#2a5a84'
-    forest: hsl(135, 33%, 75%) # darker
-    scrub: hsl(135, 33%, 87%) # lighter
-    farmland: hsl(105, 33%, 81%) # decr hue -> more yellow
-    grass: hsl(120, 33%, 75%)
-    wetland: hsl(150, 33%, 81%) # incr hue -> more blue
+    forest: hsl(112, 16%, 52%) # conifer: dark and desaturated, not meadow
+    scrub: hsl(82, 32%, 77%) # lighter
+    farmland: hsl(64, 42%, 78%) # decr hue -> more yellow
+    grass: hsl(86, 40%, 73%)
+    wetland: hsl(135, 24%, 74%) # incr hue -> more blue
     park_detail: hsl(134.5, 21%, 72%)
     golf: hsl(124, 83%, 88%) #'#C8FACC'
     industry: "#C0CDCD"
     retail: "#FEF0D0"
     civic: "#D9CFC3"
     military: "#EADCD7"
-    water: "#9dc3de" # == hsl(205, 50%, 74%) (compare ferry color)
+    water: "#86bbdb" # == hsl(205, 50%, 74%) (compare ferry color)
     # dark-blue "as is tradition" for water labels (was muted teal #51909c).
     # candidates (pick by eye against actual water fill #9dc3de):
     #   #1a3c5e - deep navy/slate, most subdued, closest to "ink" blue
@@ -127,13 +136,13 @@ global:
     #  in round 2). Ice/glacier deliberately untouched - the lightness there is the
     #  point. rock_shadow keeps ~the same ratio under the new rock so gully weathering
     #  stays a step darker, not flatter.
-    rock: "#A09584"
+    rock: "#B4AB9C"
     # rock-texture-v2 (docs/rock-texture-v2-plan.md): weathered/damp rock in gullies and
     #  concave microsites, and a muted lichen/moss crust accent common on exposed alpine
     #  rock worldwide regardless of geology - see styles.rock-texture's color block.
-    rock_shadow: "#6E6555"
+    rock_shadow: "#756C66"
     rock_lichen: "#9B9457"
-    scree: "#DCD4C3"
+    scree: "#E2D9CA"
     road: "#fff"
     casing_16: "#999"
     casing_18: "#aaa"
@@ -145,7 +154,7 @@ global:
     motorway_link: "#FDE293" #'#aaa'
     motorway_muted: "#eee"
     path: "#fff"
-    unpaved_trail: "#D00000"
+    unpaved_trail: "#B50F0F"
     scramble_trail: "#FFA500"
     bike_lane: "#008800"
     bike_path: "#004C00"
@@ -480,6 +489,12 @@ global:
   show_bike: false
   show_transit: false
   show_trails: false
+  # hiking trails in tilted views fade out where the ground is coarser than this effective zoom (see style trail)
+  trail_far_zoom: 11
+  # depth shift multiplier for trails (see style trail)
+  trail_depth_boost: 2.5
+  # same idea for ski runs, piste areas and lifts (styles lifted-lines / lifted-polygons)
+  lift_depth_boost: 3.0
   show_ski_runs: false
   show_parking: false
   show_motorways: true
@@ -504,6 +519,193 @@ application:
       label: Peak Candidacy Pool Floor (m, NOT a prominence signal)
       min: 0
       max: 3000
+      step: 50
+    # Forest trees (styles.forest-trees) - see docs/tree-rendering-plan.md
+    u_tree_mode:
+      style: forest-trees
+      label: Trees (0 canopy only, 1 trees)
+      min: 0
+      max: 1
+      step: 1
+    u_tree_spacing:
+      style: forest-trees
+      label: Tree Spacing (m)
+      min: 3
+      max: 20
+      step: 0.5
+    u_tree_grain:
+      style: forest-trees
+      label: Forest Far Grain
+      min: 0
+      max: 1
+      step: 0.05
+    u_pf_val_f:
+      style: forest-trees
+      label: 'Forest Value (brightness x) - flat'
+      min: 0.5
+      max: 1.4
+      step: 0.01
+    u_pf_val_t:
+      style: forest-trees
+      label: 'Forest Value (brightness x) - tilted'
+      min: 0.5
+      max: 1.4
+      step: 0.01
+    u_pf_sat_f:
+      style: forest-trees
+      label: 'Forest Saturation x - flat'
+      min: 0.4
+      max: 1.8
+      step: 0.01
+    u_pf_sat_t:
+      style: forest-trees
+      label: 'Forest Saturation x - tilted'
+      min: 0.4
+      max: 1.8
+      step: 0.01
+    u_pf_lift_f:
+      style: forest-trees
+      label: 'Forest Pale lift (toward white) - flat'
+      min: 0.0
+      max: 0.5
+      step: 0.01
+    u_pf_lift_t:
+      style: forest-trees
+      label: 'Forest Pale lift (toward white) - tilted'
+      min: 0.0
+      max: 0.5
+      step: 0.01
+    u_pf_hue_f:
+      style: forest-trees
+      label: 'Forest Sun-warm / shade-cool tint - flat'
+      min: 0.0
+      max: 1.5
+      step: 0.05
+    u_pf_hue_t:
+      style: forest-trees
+      label: 'Forest Sun-warm / shade-cool tint - tilted'
+      min: 0.0
+      max: 1.5
+      step: 0.05
+    u_pf_gap_f:
+      style: forest-trees
+      label: 'Forest Canopy shade on the ground (alpha) - flat'
+      min: 0.0
+      max: 0.8
+      step: 0.01
+    u_pf_gap_t:
+      style: forest-trees
+      label: 'Forest Canopy shade on the ground (alpha) - tilted'
+      min: 0.0
+      max: 0.8
+      step: 0.01
+    u_pf_tone_f:
+      style: forest-trees
+      label: 'Forest Crown light/shade range - flat'
+      min: 0.0
+      max: 2.5
+      step: 0.05
+    u_pf_tone_t:
+      style: forest-trees
+      label: 'Forest Crown light/shade range - tilted'
+      min: 0.0
+      max: 2.5
+      step: 0.05
+    u_pf_haze:
+      style: forest-trees
+      label: 'Forest aerial haze (0 none, 1 same as terrain)'
+      min: 0.0
+      max: 1.0
+      step: 0.05
+    u_pf_feather:
+      style: forest-trees
+      label: 'Forest edge feather (m)'
+      min: 0.0
+      max: 150.0
+      step: 5.0
+    u_pf_shadow_f:
+      style: forest-trees
+      label: 'Forest: tree cast-shadow strength - flat'
+      min: 0.0
+      max: 0.8
+      step: 0.02
+    u_pf_shadow_t:
+      style: forest-trees
+      label: 'Forest: tree cast-shadow strength - tilted'
+      min: 0.0
+      max: 0.8
+      step: 0.02
+    u_meadow_texture:
+      style: unlit-polygons
+      label: Meadow Carpet Texture
+      min: 0
+      max: 0.3
+      step: 0.01
+    u_tree_slope_shade:
+      style: forest-trees
+      label: Forest Slope Shading (sun/shade)
+      min: 0
+      max: 1.5
+      step: 0.05
+    u_tree_min_px:
+      style: forest-trees
+      label: Min Crown Size (screen px)
+      min: 2
+      max: 12
+      step: 0.5
+    u_tree_max_scale:
+      style: forest-trees
+      label: Max Crown Growth with Distance (x)
+      min: 1
+      max: 16
+      step: 1
+    u_tree_height:
+      style: forest-trees
+      label: Conifer Height (m)
+      min: 8
+      max: 45
+      step: 1
+    u_tree_max_aspect:
+      style: forest-trees
+      label: Max Tree Height / Width (drawn)
+      min: 1
+      max: 6
+      step: 0.1
+    u_tree_contrast:
+      style: forest-trees
+      label: Tree Contrast
+      min: 0
+      max: 1.5
+      step: 0.05
+    u_tree_conifer:
+      style: forest-trees
+      label: Conifer Fraction (0.5 = by elevation/latitude)
+      min: 0
+      max: 1
+      step: 0.05
+    u_tree_lean_cos:
+      style: forest-trees
+      label: Tree Lean at Tilt 0 (cos)
+      min: 0.3
+      max: 1
+      step: 0.05
+    u_tree_canopy_contrast:
+      style: forest-trees
+      label: Canopy Contrast
+      min: 0
+      max: 2
+      step: 0.05
+    u_tree_canopy_stroke:
+      style: forest-trees
+      label: Canopy Brush Strokes
+      min: 0
+      max: 2
+      step: 0.1
+    u_treeline_offset:
+      style: forest-trees
+      label: Treeline Offset (m)
+      min: -1500
+      max: 1500
       step: 50
     # Procedural rock surface (styles.rock-texture) - bare_rock land cover only
     u_rock_scale:
@@ -633,9 +835,7 @@ sources:
     attribution: |
       © OpenStreetMap contributors
     max_zoom: 11
-    # without a DEM the outlines (and anything else draped) sit at sea level, under the terrain
-    rasters: global.elevation_sources
-    mvt_layers: [landuse, water, poi]
+    mvt_layers: [landuse, water]
     zoom_retention: 4.0
 
 fonts:
@@ -688,6 +888,61 @@ fonts:
       url: ../fonts/plex/IBMPlexSans_Condensed-SemiBold.ttf
     - weight: 700
       url: ../fonts/plex/IBMPlexSans_Condensed-Bold.ttf
+  # U001 (URW, ~/.fonts/U001): only Regular/Italic/Bold/Bold Italic exist, so weights 300-500
+  #  map to Regular and 600-700 to Bold. Declared here because the system-font lookup does not
+  #  find it (the family name is lowercased on the way). U001Con is the condensed cut.
+  U001:
+    - weight: 300
+      url: /home/sebastian/.fonts/U001/u001-reg.ttf
+    - weight: 300
+      style: italic
+      url: /home/sebastian/.fonts/U001/u001-ita.ttf
+    - weight: 400
+      url: /home/sebastian/.fonts/U001/u001-reg.ttf
+    - weight: 400
+      style: italic
+      url: /home/sebastian/.fonts/U001/u001-ita.ttf
+    - weight: 500
+      url: /home/sebastian/.fonts/U001/u001-reg.ttf
+    - weight: 500
+      style: italic
+      url: /home/sebastian/.fonts/U001/u001-ita.ttf
+    - weight: 600
+      url: /home/sebastian/.fonts/U001/u001-bol.ttf
+    - weight: 600
+      style: italic
+      url: /home/sebastian/.fonts/U001/u001-bolita.ttf
+    - weight: 700
+      url: /home/sebastian/.fonts/U001/u001-bol.ttf
+    - weight: 700
+      style: italic
+      url: /home/sebastian/.fonts/U001/u001-bolita.ttf
+  U001Con:
+    - weight: 300
+      url: /home/sebastian/.fonts/U001/u001con-reg.ttf
+    - weight: 300
+      style: italic
+      url: /home/sebastian/.fonts/U001/u001con-ita.ttf
+    - weight: 400
+      url: /home/sebastian/.fonts/U001/u001con-reg.ttf
+    - weight: 400
+      style: italic
+      url: /home/sebastian/.fonts/U001/u001con-ita.ttf
+    - weight: 500
+      url: /home/sebastian/.fonts/U001/u001con-reg.ttf
+    - weight: 500
+      style: italic
+      url: /home/sebastian/.fonts/U001/u001con-ita.ttf
+    - weight: 600
+      url: /home/sebastian/.fonts/U001/u001con-bol.ttf
+    - weight: 600
+      style: italic
+      url: /home/sebastian/.fonts/U001/u001con-bolita.ttf
+    - weight: 700
+      url: /home/sebastian/.fonts/U001/u001con-bol.ttf
+    - weight: 700
+      style: italic
+      url: /home/sebastian/.fonts/U001/u001con-bolita.ttf
   IBM Plex Serif:
     - weight: 400
       url: ../shared/fonts/IBMPlexSerif-Regular.otf
@@ -787,6 +1042,25 @@ textures:
     filtering: mipmap
     wrap: repeat
 
+  # Baked crown height fields for forest-trees - regenerate with scripts/bake_tree_tiles.py
+  tree_conifer:
+    url: ../textures/tree_conifer.png
+    filtering: mipmap
+    wrap: repeat
+  tree_broadleaf:
+    url: ../textures/tree_broadleaf.png
+    filtering: mipmap
+    wrap: repeat
+  # crown ids (centre offset, hash) for the forest edge pass: read at level 0, never filtered
+  tree_conifer_id:
+    url: ../textures/tree_conifer_id.png
+    filtering: nearest
+    wrap: repeat
+  tree_broadleaf_id:
+    url: ../textures/tree_broadleaf_id.png
+    filtering: nearest
+    wrap: repeat
+
 styles:
   # blend_order -1000 to draw buildings just above other geometry; blend_order -110 to -100 reserved by app
   heightglow:
@@ -838,6 +1112,8 @@ styles:
     base: polygons
     mix: global.terrain_3d_mixin
     lighting: false
+    # covers are lit by the hillshade veil unless they opt out (forest-trees sets this true: the veil skips them)
+    stencil_write: false
     # 2026-10-12: the draped polygon grid must be as fine as the terrain lattice or triangles
     #  chord across relief and the hillshade overlay fails its depth test (unshaded patches).
     #  That only matters on rugged ground, and the fine grid costs vertices (GPU + tile build
@@ -869,6 +1145,8 @@ styles:
         # Anything unmatched (grass, scree, farmland, piste, airport...) inherits the
         # default - new covers need no edits here.
         u_forest_fill: global.color.forest
+        u_grass_fill: global.color.grass
+        u_meadow_texture: 0.12
         u_ice_fill: global.color.ice
         u_water_fill: global.color.water
         # what a (near-)vertical drawn triangle is painted as, whatever land cover owns its 2D
@@ -876,24 +1154,76 @@ styles:
         u_wall_rock_color: global.color.rock
       blocks:
         color: |
-          #ifndef ROCK_STYLE
+          // the land cover this fragment belongs to is identified by its flat fill colour; keep it
+          //  before anything below repaints color.rgb (forest trees, snow)
+          vec3 coverFill = color.rgb;
+          #ifdef FOREST_TREES
+          // a tree plane's fragment: the spruce silhouette is cut out of the quad (opaque, alpha-tested)
+          { vec4 ft = forestTrees(color.rgb); color.rgb = ft.rgb; if (ft.a < 0.5) { discard; } }
+          #elif defined(FOREST_GROUND)
+          { vec4 gs = forestGroundShade(); color.rgb = mix(color.rgb, gs.rgb, gs.a); }   // canopy shade on the meadow
+          #endif
+          #if !defined(ROCK_STYLE) && !defined(FOREST_TREES)
           {
               // wall rock for near-vertical drawn triangles whatever land cover owns the footprint
               //  (applyWallRock, elevation.yaml); rock-texture is excluded - it textures walls itself
               vec3 wallCol = applyWallRock(color.rgb, u_wall_rock_color.rgb);
-              if (distance(color.rgb, u_water_fill.rgb) >= 0.02) { color.rgb = wallCol; }
+              if (distance(coverFill, u_water_fill.rgb) >= 0.02) { color.rgb = wallCol; }
           }
           #endif
-          #ifdef SHOW_CONTOURS
+          #if defined(SNOW_MODE) && !defined(ROCK_STYLE) && !defined(FOREST_TREES)
+          {
+              // Snow Mode: rock-texture applies its own snow at the end of its block instead,
+              //  because its material blend would otherwise repaint over this
+              float snowCover = 1.0;
+              if (distance(coverFill, u_water_fill.rgb) < 0.02) { snowCover = 0.0; }
+              else if (distance(coverFill, u_forest_fill.rgb) < 0.02) { snowCover = 0.65; }
+              else if (distance(coverFill, u_ice_fill.rgb) < 0.02) { snowCover = 0.0; }
+              color.rgb = applySnow(color.rgb, snowCover);
+          }
+          #endif
+          #ifdef FOREST_TREES
+          color.rgb = treeShade(color.rgb);       // forest palette + slope light
+          #endif
+          #if !defined(ROCK_STYLE) && !defined(FOREST_TREES)
+          {
+              // meadow: a faint, world-anchored carpet - fine grain + soft tufts, fading out as soon as a pixel spans a grain
+              vec2 mq = v_world_position.xy;
+              float mfp = length(vec4(dFdx(mq), dFdy(mq))) * 0.7;
+              if (distance(coverFill, u_grass_fill.rgb) < 0.02 && u_meadow_texture > 0.0) {
+                  float wm[4]; float cs[4];
+                  cs[0] = 0.9; cs[1] = 2.6; cs[2] = 7.0; cs[3] = 20.0;
+                  wm[0] = 0.5; wm[1] = 0.8; wm[2] = 1.0; wm[3] = 0.9;
+                  float mn = 0.0;
+                  for (int i = 0; i < 4; i++) {
+                      float ai = 1.0 - smoothstep(0.25, 0.8, mfp / cs[i]);
+                      mn += wm[i] * ai * (rockVNoise(vec3(mq / cs[i], 2.7 + float(i))) - 0.5);
+                  }
+                  color.rgb *= 1.0 + u_meadow_texture * 2.0 * mn * vec3(1.0, 1.0, 0.85);   // dark = cooler, light = warmer
+              }
+          }
+          #endif
+          #if defined(TANGRAM_TERRAIN_3D) && !defined(ROCK_STYLE) && !defined(FOREST_TREES)
+          {
+              // slope lighting as albedo x irradiance (terrainSlopeLight, elevation.yaml) - replaces the hillshade
+              //  veil's slope term at tilt. k = how much the terrain normal matters for this cover.
+              float k = 0.7;                                                    // grass, scrub, farmland, sand, ...
+              if (distance(coverFill, u_water_fill.rgb) < 0.02) { k = 0.0; }    // water is flat, not terrain-lit
+              else if (distance(coverFill, u_forest_fill.rgb) < 0.02) { k = 0.4; }
+              else if (distance(coverFill, u_ice_fill.rgb) < 0.02) { k = 1.0; }
+              color.rgb = terrainSlopeShade(color.rgb, k);
+          }
+          #endif
+          #if defined(SHOW_CONTOURS) && !defined(FOREST_TREES)
           {
               float contourCov = terrainContourCoverage();
               // inland water carries no contours (lakes ride this same style; ocean is
               //  already excluded by the underwater guard inside the coverage function)
-              if (distance(color.rgb, u_water_fill.rgb) < 0.02) { contourCov = 0.0; }
+              if (distance(coverFill, u_water_fill.rgb) < 0.02) { contourCov = 0.0; }
               vec3 contourColor = u_contour_default.rgb;
-              if (distance(color.rgb, u_forest_fill.rgb) < 0.02) {
+              if (distance(coverFill, u_forest_fill.rgb) < 0.02) {
                   contourColor = u_contour_forest.rgb;
-              } else if (distance(color.rgb, u_ice_fill.rgb) < 0.02) {
+              } else if (distance(coverFill, u_ice_fill.rgb) < 0.02) {
                   contourColor = u_contour_ice.rgb;
               }
               color.rgb = mix(color.rgb, contourColor, contourCov);
@@ -1365,7 +1695,8 @@ styles:
                   //  elevation) via the shared screenAnchoredSunDir (elevation.yaml) - not
                   //  independently GUI-tunable: this is a small micro-facet accent, not the
                   //  macro shading knob Sebastian actually tunes via hillshade's sliders.
-                  vec3 sunDir = screenAnchoredSunDir(135.0, 35.264);
+                  // Tilt swing mirrors hillshade's u_sun_azimuth_3d / u_sun_elev_3d defaults (200 / 38).
+                  vec3 sunDir = tiltedSunDir(135.0, 35.264, 200.0, 38.0, terrainTiltMorph());
                   float nDotLMacro = clamp(dot(macroNormal, sunDir), 0.0, 1.0);
                   float nDotLBump = clamp(dot(perturbedNormal, sunDir), 0.0, 1.0);
                   // DELTA from the unperturbed macro normal, not the absolute dot product -
@@ -1426,6 +1757,12 @@ styles:
                   color.rgb *= mix(1.0, microLight, rockFade);
                   if (u_rock_debug > 0.5) { color.rgb = dbg; }
               }
+              #ifdef SNOW_MODE
+              color.rgb = applySnow(color.rgb, 1.0);
+              #endif
+              #ifdef TANGRAM_TERRAIN_3D
+              color.rgb = terrainSlopeShade(color.rgb, 1.0);     // macro slope lighting (the veil no longer does it at tilt)
+              #endif
               #ifdef SHOW_CONTOURS
               // Land-cover-colored contours (Wanderkarte style): bare rock carries the
               //  default grayish brown. Drawn LAST, outside the rockFade gate above
@@ -1436,8 +1773,168 @@ styles:
               #endif
           }
 
+  # Forest of whole trees (v9). Every tree is real geometry: the tile builder scatters trees on a world-anchored jittered
+  #  grid inside the forest polygon (style param tree_scatter, Builders::buildTreeScatter) - one cross of 3 vertical quads per
+  #  tree, 12 vertices - and the vertex shader stands them up (height, width, rotation from per-tree randoms). The fragment
+  #  shader cuts a spruce silhouette (pointed spire with drooping tiers) out of each quad and shades it by sun side and
+  #  height. Trees are opaque with depth write: real height, real silhouettes from the side, the asterisk from above. The tile
+  #  carries at most 128^2 trees: spacing is constant in metres from zoom 15 in and doubles per zoom out (so crowns keep a
+  #  similar size on screen). Per-tree density thinning near the outline: whole trees, no seam, no shimmer.
+  #  The ground between the trees is forest-ground (below): the meadow darkened by canopy shade.
+  forest-trees:
+    mix: unlit-polygons
+    # the hillshade veil does not draw over the crowns (stencil, see hillshade.yaml)
+    stencil_write: true
+    texcoords: true            # (random, spacing) per tree
+    tree_scatter: 20           # projected metres of outline feather: density ramps 0 -> 1 over this
+    shaders:
+      defines:
+        FOREST_TREES: true
+      uniforms:
+        u_tree_mode: 1.0
+        u_tree_spacing: 12.0
+        u_tree_height: 26.0    # metres at zoom 15 and closer; trees scale up with the grid spacing when zoomed out
+        u_tree_slope_shade: 0.8
+        # palette (optometrist-tunable): *_f = top-down value, *_t = fully tilted; blended by terrainTiltMorph()
+        u_pf_val_f: 1.04
+        u_pf_val_t: 0.92
+        u_pf_sat_f: 0.9
+        u_pf_sat_t: 1.15
+        u_pf_lift_f: 0.2
+        u_pf_lift_t: 0.04
+        u_pf_hue_f: 0.5
+        u_pf_hue_t: 0.7
+        u_pf_gap_f: 0.0     # no ambient tint under the forest: the ground is the meadow, unchanged
+        u_pf_gap_t: 0.0
+        u_pf_shadow_f: 0.2
+        u_pf_shadow_t: 0.4
+        u_pf_tone_f: 0.7
+        u_pf_tone_t: 1.2
+        u_pf_haze: 0.5
+        u_pf_feather: 20.0
+        u_tree_grain: 0.45
+        u_tree_min_px: 5.0
+        u_tree_max_scale: 4.0
+        u_tree_max_aspect: 3.0
+        u_tree_contrast: 0.5
+        u_tree_conifer: 0.5
+        u_tree_lean_cos: 0.35
+        u_tree_canopy_contrast: 0.4
+        u_tree_canopy_stroke: 1.0
+        u_treeline_offset: 0.0
+      blocks:
+        position: |
+          #ifdef FOREST_TREES
+          {
+              // a_position = the tree's BASE (same for all 12 vertices, so the terrain draping above gives them its elevation);
+              //  a_normal = (corner u -1/+1, corner v 0/1, plane index), a_texcoord = (random, grid spacing / 256 m)
+              float cu = a_normal.x, cv = a_normal.y;
+              float pl = floor(a_normal.z * 127.0 / 40.0 + 0.5);
+              float r = a_texcoord.x;
+              float sp = a_texcoord.y * 256.0;
+              float th = (r + pl) * 1.0472;                                   // 3 planes, 60 degrees apart, random start
+              vec2 dir = vec2(cos(th), sin(th));
+              // the grid spacing doubles per zoom out (sp0 = 7.64 m from zoom 15 in): crowns grow in proportion, but height only as sp^0.45
+              //  and never above 42 m - otherwise the far tiles carry 100 m spires
+              float Hh = min(u_tree_height * pow(sp / 7.64, 0.45), 42.0) * (0.7 + 0.6 * fract(r * 13.7));
+              float hw = 0.31 * sp * (0.75 + 0.5 * fract(r * 7.3));
+              position.xy += dir * (cu * hw);
+              position.z += cv * Hh;
+              v_tree_a = vec4(cu, cv, pl, r);
+              v_tree_dir = dir;
+          }
+          #endif
+        global: |
+          // ---- Forest trees v9 (see the style comment above) --------------------------------------------------------------
+          varying vec4 v_tree_a;     // (corner u -1..1 across the plane, v 0..1 up, plane, random)
+          varying vec2 v_tree_dir;   // the plane's horizontal direction
+          const float EDGE_CAP_M = 240.0;                       // keep in sync with edge_distance on forest-ground
+          #ifdef TANGRAM_FRAGMENT_SHADER
+
+          // Forest palette + terrain light, expressed in the colour range (dark green .. saturated green), not as a veil.
+          //  Flat/tilted pairs (u_pf_*_f / _t) are the optometrist-tunable knobs.
+          vec3 treeShade(vec3 col) {
+              float tm = terrainTiltMorph();
+              vec4 ml = terrainForestLight();
+              float k = u_tree_slope_shade;
+              vec3 c = col * mix(vec3(1.0), ml.rgb, k);
+              float l = dot(c, vec3(0.299, 0.587, 0.114));
+              c = max(mix(vec3(l), c, 1.0 + 0.8 * k * (ml.a - 1.0)), 0.0);
+              // Niehues/Berann: sunlit slopes drift yellow-green, shaded ones blue-green
+              float sunk = clamp(0.5 + 2.0 * (ml.a - 1.0), 0.0, 1.0);
+              vec3 tint = mix(vec3(0.90, 1.0, 1.10), vec3(1.08, 1.04, 0.88), sunk);
+              c *= mix(vec3(1.0), tint, mix(u_pf_hue_f, u_pf_hue_t, tm));
+              c *= mix(u_pf_val_f, u_pf_val_t, tm);
+              l = dot(c, vec3(0.299, 0.587, 0.114));
+              c = mix(vec3(l), c, mix(u_pf_sat_f, u_pf_sat_t, tm));
+              float lift = mix(u_pf_lift_f, u_pf_lift_t, tm);
+              return c * (1.0 - lift) + lift;
+          }
+
+          // One tree plane's fragment: spruce silhouette cut out of the quad; (colour before the palette grade, keep 0/1).
+          vec4 forestTrees(vec3 fill) {
+              float u = v_tree_a.x, v = v_tree_a.y, r = v_tree_a.w;
+              // pointed spire, drooping tiers: each tier flares at its lower edge and notches above it
+              float tier = fract(v * 8.0 + r * 5.0);
+              float w = pow(max(1.0 - v, 0.0), 0.85) * (0.60 + 0.40 * (1.0 - tier));
+              w = max(w, 0.18 * step(v, 0.1));                       // a trunk stub at the bottom
+              float keep = step(abs(u), w);
+              float tm = terrainTiltMorph();
+              vec3 sunW = normalize(tiltedSunDir(135.0, 35.264, 200.0, 38.0, tm));
+              vec2 sunH = normalize(sunW.xy + 1e-5);
+              float side = u * dot(v_tree_dir, sunH);                // + on the flank facing the sun
+              float lit = smoothstep(-0.7, 0.7, side * 1.3 + 0.2);
+              float toneK = mix(u_pf_tone_f, u_pf_tone_t, tm);
+              float tone = 1.0 + (r - 0.5) * 0.35 * toneK;
+              vec3 g = fill * tone * mix(0.80, 1.06, lit) * mix(0.55, 1.0, smoothstep(0.0, 0.7, v)) * mix(0.9, 1.0, tier);
+              g = mix(g * vec3(0.95, 0.99, 1.04), g, lit);           // cool shadow flank
+              #ifdef SNOW_MODE
+              g = mix(g, vec3(0.95, 0.97, 1.0), snowAmount() * 0.35 * lit * smoothstep(0.3, 0.8, v));
+              #endif
+              return vec4(mix(fill, g, min(u_tree_contrast * 1.6, 1.0)), keep);
+          }
+
+          // Ground pass (forest-ground underlay, a normal meadow polygon): the meadow darkened by the canopy's shade, fading out
+          //  toward the outline. v_texcoord.x = distance to the outline / EDGE_CAP_M (baked into the vertices by the tile builder).
+          vec4 forestGroundShade() {
+              float sUn = exp(u_map_position.y / 6378137.0);
+              float cosLat = 2.0 / (sUn + 1.0 / sUn);
+              float tm = terrainTiltMorph();
+              float feather = min(u_pf_feather / cosLat, 0.95 * EDGE_CAP_M);
+              float d0 = v_texcoord.x * EDGE_CAP_M;
+              float wM = 1.0 - smoothstep(0.0, 0.6 * feather, d0);
+              float snowAmt = 0.0;
+              #ifdef SNOW_MODE
+              snowAmt = snowAmount();
+              #endif
+              float sA = mix(u_pf_gap_f, u_pf_gap_t, tm) * (1.0 - wM) * (1.0 - 0.6 * snowAmt) * step(0.5, u_tree_mode);
+              return vec4(0.05, 0.08, 0.11, clamp(sA, 0.0, 1.0));
+          }
+          #endif
+
+  # The meadow below a forest: a normal (opaque, veiled) meadow polygon, darkened by the canopy shade. Same edge distance
+  #  as the fade; forest-trees then draws only the trees over it.
+  forest-ground:
+    mix: forest-trees
+    blend: opaque
+    stencil_write: false
+    tree_scatter: 0
+    terrain_grid: 128
+    texcoords: true
+    edge_distance: 240
+    shaders:
+      defines:
+        FOREST_TREES: false
+        FOREST_GROUND: true
+
   ocean-polygons:
     base: polygons
+    # Curved world: the terrain mesh sinks with distance (terrain-3d position block), but this style used
+    #  to be plain flat geometry at z=0, so in tilted views the ocean floated above the bent horizon.
+    #  The terrain mixin (empty/undefined in 2D-only scenes) applies the same drop; terrain_grid
+    #  tessellates the big ocean polygons because the drop is nonlinear (chords would sag).
+    mix: global.terrain_3d_mixin
+    terrain_grid: 128
     lighting: false
     # need to match depth_shift in raster style or ocean will be placed under terrain
     shaders:
@@ -1447,9 +1944,74 @@ styles:
           depth_shift = -0.02*u_proj[2][3];
           #endif
 
+  # Ski runs, lifts: draped features that z-fought the terrain. The translucent hillshade veil gets a
+  #  slope-aware depth shift toward the camera (terrain_depth_slope, up to 5x) while draped geometry
+  #  only gets the flat terrain_depth_shift, so on slopes the veil (and the terrain) won the depth
+  #  test over the feature. Same fix as the trail style: scale the feature's own shift.
+  lifted-lines:
+    mix: unlit-lines
+    shaders:
+      defines:
+        LIFT_DEPTH_BOOST: global.lift_depth_boost
+      blocks:
+        position: |
+          #ifdef TANGRAM_TERRAIN_3D
+          depth_shift *= float(LIFT_DEPTH_BOOST);
+          #endif
+  # Piste areas overlap forest/scrub polygons (the run IS cleared forest); the shift also makes them
+  #  win against those coplanar polygons whatever the draw order, instead of z-fighting them.
+  lifted-polygons:
+    mix: unlit-polygons
+    # terrain_grid is NOT inherited through mix (see rock-texture's comment): without it the
+    #  polygons are not tessellated to the terrain lattice and cut across relief
+    terrain_grid: 128
+    shaders:
+      defines:
+        LIFT_DEPTH_BOOST: global.lift_depth_boost
+      blocks:
+        position: |
+          #ifdef TANGRAM_TERRAIN_3D
+          depth_shift *= float(LIFT_DEPTH_BOOST);
+          #endif
+
   # dash only supported for styles, not draw block because each dash pattern requires separate shader
   dashed-border: { mix: unlit-lines, dash: [2.0, 0.5] }
   dashed-path: { mix: unlit-lines, dash: [3.0, 0.5] }
+  # Hiking trails: continuous lines (scrambles use trail-dashed). Two things beyond unlit-lines:
+  #  1. Far-field cull. In tilted views distant trails shrink to sub-pixel aliased spiderweb that
+  #     costs fill/overdraw for nothing. The criterion is the fragment's ground sample distance
+  #     relative to the view center, expressed as an "effective zoom" (view zoom minus log2 of
+  #     how much coarser this fragment is than the center): trails fade out between
+  #     global.trail_far_zoom +/- 0.5. Top-down views have effective zoom ~= view zoom, so they
+  #     are never culled (the zoom ladder in the layer handles those); a tilted view keeps
+  #     trails as far as the map would still show them at that zoom, however distance and
+  #     camera height combine.
+  #  2. Depth boost. Trails sat UNDER the translucent hillshade veil on slopes, which reads as
+  #     patches of lighter, washed-out trail: the veil mesh gets a slope-aware depth shift
+  #     toward the camera (terrain_depth_slope, up to 5x) while draped lines only get the flat
+  #     terrain_depth_shift. Boosting the trails' shift keeps them in front of the veil.
+  trail:
+    mix: unlit-lines
+    shaders:
+      defines:
+        TRAIL_DEPTH_BOOST: global.trail_depth_boost
+      uniforms:
+        u_trail_far_zoom: global.trail_far_zoom
+      blocks:
+        position: |
+          #ifdef TANGRAM_TERRAIN_3D
+          depth_shift *= float(TRAIL_DEPTH_BOOST);
+          #endif
+        filter: |
+          #ifdef TANGRAM_TERRAIN_3D
+          {
+              float tGsd = max(length(dFdx(v_world_position.xy)), length(dFdy(v_world_position.xy)));
+              float tZeff = u_map_position.z - log2(max(tGsd / u_meters_per_pixel, 1e-3));
+              color.a *= smoothstep(u_trail_far_zoom - 0.5, u_trail_far_zoom + 0.5, tZeff);
+              if (color.a <= 0.003) { discard; }
+          }
+          #endif
+  trail-dashed: { mix: trail, dash: [2.0, 1.0] }
   dashed-track: { mix: unlit-lines, dash: [2.5, 1.0] }
   dashed-steps: { mix: unlit-lines, dash: [0.5, 0.5] }
   dashed-bike: { mix: unlit-lines, dash: [1.0, 1.0] }
@@ -1470,7 +2032,7 @@ styles:
       </svg>
 
   piste-direction:
-    mix: unlit-lines
+    mix: lifted-lines
     texture: |
       data:image/svg+xml;utf8,<svg width="10pt" height="80pt" viewBox="-5 -40 10 80">
         <g fill="#fff"> <path d="M-5 -40 L-5 0 L0 -4 L5 0 L5 -40Z M-5 40 L-5 6 L0 2 L5 6 L5 40Z"/> </g>
@@ -1557,7 +2119,14 @@ layers:
         color: global.color.landuse
     forest:
       filter: [{ landuse: forest }, { natural: wood }]
-      draw: { polygons: { visible: true, color: global.color.forest } }
+      draw:
+        polygons: { visible: true, color: global.color.forest, style: global.forest_style }
+        # meadow colour below the trees (forest-trees leaves the ground between the crowns transparent), one order lower
+        ground:
+          visible: function() { return global.forest_style === 'forest-trees'; }
+          style: forest-ground
+          color: global.color.grass
+          order: function() { return 589 - Math.log(feature.area || 1); }
     scrub:
       filter: { natural: [scrub, fell, heath] }
       draw: { polygons: { visible: true, color: global.color.scrub } }
@@ -1733,12 +2302,13 @@ layers:
       # give park POI (w/ icon) priority
       not: { leisure: [park, golf_course] }
       any:
-        - { boundary: national_park, $zoom: { min: 8 } }
+        - { boundary: national_park, $zoom: { min: 8 }, none: [global.world_area_labels] }
         - {
             protect_class: ["1", "1a", "1b", "2", "3", "4", "5"],
             $zoom: { min: 10 },
+            none: [global.world_area_labels],
           }
-        - { leisure: nature_reserve, $zoom: { min: 10 } }
+        - { leisure: nature_reserve, $zoom: { min: 10 }, none: [global.world_area_labels] }
         - { protect_class: ["6", "7", "12", "14", "22", "97", "98"], $zoom: { min: 10 } }
         - { landuse: [commercial, retail, winter_sports], $zoom: { min: 12 } }
         - {
@@ -1849,11 +2419,135 @@ layers:
     filter: { $geometry: polygon, name: true }
     draw: { lines: { style: unlit-lines, order: 900, color: "#ff9800", width: 1.5px } }
 
+  # --- world-space area labels ------------------------------------------------------------
+  # Tile side: the `area-labels` style emits no label here, it deposits each named polygon
+  #  fragment (world meters) into the scene's AreaRegistry. Not zoom dependent: a data tile is
+  #  deposited once. `area` is in m2 (whole feature).
+  area_fragments_water:
+    enabled: global.world_area_labels
+    data: { source: osm-areas, layer: water }
+    filter: { $geometry: polygon, name: true, area: { min: 30000 } }
+    draw: { fragments: { style: area-labels, order: 1 } }
+
+  area_fragments_glacier:
+    enabled: global.world_area_labels
+    data: { source: osm-areas, layer: landuse }
+    filter: { $geometry: polygon, name: true, natural: glacier, area: { min: 30000 } }
+    draw: { fragments: { style: area-labels, order: 1 } }
+
+  area_fragments_park:
+    enabled: global.world_area_labels
+    data: { source: osm-areas, layer: landuse }
+    filter:
+      $geometry: polygon
+      name: true
+      not: { leisure: [park, golf_course] }
+      any:
+        - { boundary: national_park }
+        - { protect_class: ["1", "1a", "1b", "2", "3", "4", "5"] }
+        - { leisure: nature_reserve }
+    draw: { fragments: { style: area-labels, order: 1 } }
+
+  # Marker side: draw rules AreaLabelManager's markers are styled with
+  #  (layers.area_label_<kind>.draw.text). The layer matches no real data (the `area_label_marker`
+  #  MVT layer does not exist); it only carries the rule. The marker feature is a part's spine.
+  area_label_water:
+    data: { source: osm-areas, layer: area_label_marker }
+    draw:
+      text:
+        style: area-labels
+        interactive: true
+        text_source: global.names_one_line
+        transition: { show: { time: 0s }, hide: { time: 0.15s } }
+        priority: global.priority.water
+        font:
+          family: global.natural_font
+          weight: 400
+          style: italic
+          size: |
+            function() {
+                var a = feature.area || 0;
+                return a > 4e8 ? 19 : a > 4e7 ? 16 : a > 4e6 ? 14 : a > 4e5 ? 12.5 : 11.5;
+            }
+          letter_spacing: 0.06
+          letter_spacing_fit: 0.8
+          letter_spacing_max: 1.2
+          fill: global.color.water_name
+          stroke: { color: global.color.water_halo, width: 3 }
+
+  area_label_park:
+    data: { source: osm-areas, layer: area_label_marker }
+    draw:
+      text:
+        style: area-labels
+        interactive: true
+        text_source: global.names_one_line
+        transition: { show: { time: 0s }, hide: { time: 0.15s } }
+        priority: global.priority.forest
+        font:
+          family: global.natural_font
+          weight: 500
+          size: [[8, 10.5px], [11, 11.5px], [13, 12.5px]]
+          transform: uppercase
+          letter_spacing: 0.14
+          letter_spacing_fit: 0.85
+          letter_spacing_max: 1.8
+          fill: global.color.park_name
+          stroke: { color: global.color.park_halo, width: 3.8 }
+
+  area_label_park_national:
+    data: { source: osm-areas, layer: area_label_marker }
+    draw:
+      text:
+        style: area-labels
+        interactive: true
+        text_source: global.names_one_line
+        transition: { show: { time: 0s }, hide: { time: 0.15s } }
+        priority: global.priority.national_park
+        font:
+          family: global.natural_font
+          weight: 600
+          size: [[7, 10.5px], [10, 12px], [13, 14px]]
+          transform: uppercase
+          letter_spacing: 0.2
+          letter_spacing_fit: 0.85
+          letter_spacing_max: 2.0
+          fill: global.color.park_name
+          stroke: { color: global.color.park_halo, width: 3.8 }
+
+  area_label_glacier:
+    data: { source: osm-areas, layer: area_label_marker }
+    draw:
+      text:
+        style: area-labels
+        interactive: true
+        transition: { show: { time: 0s }, hide: { time: 0.15s } }
+        text_source: |
+          function() {
+              var n = (global.show_name_en && feature.name_en ? feature.name_en : feature.name) || "";
+              return n.split(" / ")[0];
+          }
+        priority: global.priority.water
+        font:
+          family: global.natural_font
+          weight: 400
+          style: italic
+          size: |
+            function() {
+                var a = feature.area || 0;
+                return a > 5e7 ? 16 : a > 1e7 ? 14.5 : a > 2e6 ? 13 : 12;
+            }
+          letter_spacing: 0.1
+          letter_spacing_fit: 0.8
+          letter_spacing_max: 1.2
+          fill: global.color.glacier_name
+          stroke: { color: global.color.glacier_halo, width: 3.5 }
+
   landuse_glacier_name:
     enabled: global.glacier_polygon_labels
     data: { source: osm, layer: landuse }
     exclusive: true
-    filter: { name: true, natural: glacier, area: { min: 9000px2 }, $zoom: { min: 10 } }
+    filter: { name: true, natural: glacier, area: { min: 9000px2 }, $zoom: { min: 10 }, none: [global.world_area_labels] }
     draw:
       text:
         interactive: true
@@ -2028,8 +2722,13 @@ layers:
     # cases (e.g. natural=bay tagged on a single node) where only a point exists.
     filter:
       name: true
-      $geometry: [polygon, point]
-      any: [{ $zoom: { min: 17 } }, { area: { min: 500px2 } }]
+      all:
+        - any: [{ $zoom: { min: 17 } }, { area: { min: 500px2 } }]
+        - any:
+            # the centroid point is the old planner's fallback; with world-space labels it only
+            #  names the ponds too small to be in the registry (area < 30000 m2)
+            - { $geometry: point, any: [{ none: [global.world_area_labels] }, { area: { max: 30000 } }] }
+            - { $geometry: polygon, none: [global.world_area_labels] }
     draw:
       text:
         interactive: true
@@ -2296,29 +2995,33 @@ layers:
                 width: [[14, 0px], [14, 0.5px], [15, 3px], [18, 6px]],
               },
           }
+      # declared BEFORE unpaved so that, with trails on, unpaved's solid trail style wins
+      poor:
+        filter: { trail_visibility: [bad, very_bad, horrible, no, none, poor] }
+        draw: { lines: { style: dashed-bike } }
       unpaved:
         enabled: global.show_trails
         filter:
-          - highway: path
-          - { highway: footway, surface: unpaved }
+          $zoom: { min: 12 }  # trails appear from z12.5: tile zoom is an integer, so the width ramp below does the half step
+          any:
+            - highway: path
+            - { highway: footway, surface: unpaved }
         default:
           #filter: [ { $zoom: { min: 12 } }, { name: true }, { ref: true }, { has_name: true } ]
           draw:
             {
               lines:
                 {
+                  style: trail,
                   color: global.color.unpaved_trail,
-                  width: [[10, 0.5px], [12, 1px], [18, 3px]],
+                  width: [[12.4, 0px], [12.5, 1px], [15, 1.5px], [18, 3px]],
                 },
             }
         scramble:
           # what about demanding_mountain_hiking and alpine_hiking levels?
           filter:
             { sac_scale: [demanding_alpine_hiking, difficult_alpine_hiking] }
-          draw: { lines: { color: global.color.scramble_trail } }
-      poor:
-        filter: { trail_visibility: [bad, very_bad, horrible, no, none, poor] }
-        draw: { lines: { style: dashed-bike } }
+          draw: { lines: { style: trail-dashed } }
 
     tracks:
       filter:
@@ -2387,6 +3090,7 @@ layers:
         $zoom: { min: 10 }
       draw:
         lines:
+          style: lifted-lines
           order: global.order.aerialway # aerialway would more often be over bridge vs under
           color: global.color.aerialway
           width: [[14, 0.5px], [15, 1.0px], [16, 2m]]
@@ -2447,7 +3151,7 @@ layers:
         draw:
           polygons:
             #visible: global.show_ski_runs
-            style: global.earth_style
+            style: lifted-polygons
             order: global.order.piste_area
             color: global.piste_color_fn
       piste_lines:
@@ -2455,12 +3159,13 @@ layers:
         draw:
           lines:
             #visible: global.show_ski_runs
+            style: lifted-lines
             order: global.order.piste
             color: global.piste_color_fn
             width:
               [[10, 0.5px], [11, 0.75px], [12, 1.0px], [13, 1.5px], [18, 3m]]
             outline:
-              style: unlit-lines
+              style: lifted-lines
               color: global.color.piste_halo
               width: [[13, 0px], [14, 2px]]
         default:

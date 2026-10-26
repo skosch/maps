@@ -54,6 +54,13 @@ stylus-bike-hike:
     global.show_trails: true
     global.show_ski_runs: true
 
+stylus-snow:
+  title: Ascend OSM Snow
+  layers: [ stylus-osm-terrain ]
+  updates:
+    global.snow_mode: true
+    global.show_ski_runs: true
+
 stylus-transit:
   title: Ascend OSM Transit
   layers: [ stylus-osm-terrain ]
